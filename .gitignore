@@ -1,1 +1,4 @@
 .env
+target/
+.venv/
+.caesim-report.json

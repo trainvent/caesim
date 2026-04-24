@@ -15,13 +15,14 @@ Build a safe image-library trimming utility with:
 ## 2.1 Command
 
 ```bash
-caesim cut <path> --rule "<text>" [--dry-run] [--cut-dir <name>] [--report <file>]
+caesim cut <path> [--cut-rule <text>] [--cut-img <image>] [--dry-run] [--cut-dir <name>] [--report <file>]
 ```
 
 ## 2.2 Arguments
 
 1. `<path>`: root folder to scan
-2. `--rule`: plain-language rule (stored in report)
+2. `--cut-rule`: plain-language rule (stored in report)
+2. `--cut-img`: filter out all images containing the given image (stored in report)
 3. `--dry-run`: preview matches without moving files
 4. `--cut-dir`: default `cut`
 5. `--report`: default `.caesim-report.json`
@@ -34,6 +35,31 @@ caesim cut <path> --rule "<text>" [--dry-run] [--cut-dir <name>] [--report <file
 4. Produce candidate list.
 5. If not `--dry-run`, move candidates to `<path>/<cut-dir>/`.
 6. Write report manifest.
+
+## 3.1 Complexity + Cost Gating (pre-publish, staged)
+
+We want a gating flow before we ship anything that could incur real cost (e.g. future model-based classification, cloud execution, or any paid APIs).
+
+For now (MVP milestone), **implement complexity estimation only**. Do **not** implement money movement, charging, or external billing.
+
+### Complexity estimate (now)
+
+When the user runs the command, compute and surface a deterministic estimate:
+
+- **Complexity inputs**: number of files scanned, bytes, image types, enabled rule(s), and whether any expensive analysis would be required.
+- **Complexity output**: a single numeric score (and/or tiers like `low|medium|high`) recorded in the report JSON.
+- **User UX**: print the estimate before doing any irreversible action (moving files is still non-destructive, but treat it as gated).
+
+### Wallet + cost estimate (later, last step before publishing)
+
+Add a **Wallet** concept that users can preload with money (USD). The flow should be:
+
+1. **Estimate first**: show an estimated dollar cost derived from complexity (and any metered operations).
+2. **First confirmation**: user acknowledges the estimate.
+3. **Second confirmation**: user confirms again to proceed with the paid run.
+4. **Then run**: produce final results and deduct from wallet.
+
+Until we implement the wallet, steps (2)-(4) are placeholders and should be clearly labeled as such in docs/CLI output.
 
 ## 4. Rule Engine (MVP First Pass)
 
@@ -52,6 +78,20 @@ Start simple and deterministic:
    - blur score threshold
 
 Keep rule processing modular so we can add model-based classification later.
+
+## 4.1 Backboard AI Integration (optional, post-run + advanced rules)
+
+Backboard is **not required** for the MVP deterministic CLI. It becomes useful in two places:
+
+1. **Advanced semantic cut rules (optional provider)**:
+   - When rules go beyond filenames/hashes/basic image stats (e.g. “contains faces”, “contains receipts”, “private info”, “memes”, “screenshots of chats”, “bad composition”), route scoring through a Backboard-powered classifier/assistant.
+   - Keep the local pipeline unchanged: Backboard should return structured labels/tags + confidence so we can map them to deterministic `reason` strings in the report.
+   - This is the main future source of “real cost”, so it must plug into the complexity/cost gating flow.
+
+2. **Post-run chatbot for cleanup + explanation**:
+   - After a run completes, treat the report (`.caesim-report.json`) as the primary artifact.
+   - A Backboard assistant can answer questions like “why was this cut?”, “group by reason”, “suggest a safer rule”, or “show me borderline items”, using the report contents (and later, user preferences via memory).
+   - This mode is “assistive” and should never move/delete files by itself; it only proposes actions or generates a follow-up command invocation.
 
 ## 5. Data Outputs
 

@@ -47,6 +47,35 @@ caesim cut ./my-photos --rule "screenshots"
 
 Documentation phase. Build recipe is in [DEVELOPER.md](/home/leonmarq/Code/caesim/DEVELOPER.md).
 
+## Dev quickstart (Rust + optional Python Vision)
+
+### Local-only run (no AI)
+
+```bash
+cargo run -- cut ./my-photos --cut-rule screenshots --dry-run
+```
+
+### Google Cloud Vision (optional backend)
+
+This repo includes a small Python backend (`python/vision_backend.py`) that the Rust CLI can call to label images via **Cloud Vision API**.
+
+- Install deps:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+- Configure Google credentials (recommended: Application Default Credentials) and enable the Vision API in your GCP project.
+- Run with Vision enabled:
+
+```bash
+cargo run -- cut ./my-photos --cut-rule explicit --vision --dry-run
+```
+
+Note: the first `cargo build` / `cargo run` needs access to `crates.io` to download Rust dependencies.
+
 ## Source
 
 Based on `https://caesim.com/` content (accessed April 23, 2026).
