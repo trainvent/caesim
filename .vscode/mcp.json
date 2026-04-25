@@ -1,0 +1,19 @@
+{
+	"servers": {
+		"backboard-docs": {
+			"type": "http",
+			"url": "https://backboard-docs.docsalot.dev/api/mcp",
+			"headers": {
+				"X-API-Key": "${input:backboard-api-key}"
+			}
+		}
+	},
+	"inputs": [
+		{
+			"type": "promptString",
+			"id": "backboard-api-key",
+			"description": "Backboard API Key",
+			"password": true
+		}
+	]
+}
