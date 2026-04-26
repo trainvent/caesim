@@ -2,18 +2,15 @@
 	"servers": {
 		"backboard-docs": {
 			"type": "http",
-			"url": "https://backboard-docs.docsalot.dev/api/mcp",
-			"headers": {
-				"X-API-Key": "${input:backboard-api-key}"
+			"url": "https://backboard-docs.docsalot.dev/api/mcp"
+		},
+		"backboard-api": {
+			"type": "stdio",
+			"command": "node",
+			"args": ["./mcp/backboard-api-server.js"],
+			"env": {
+				"BACKBOARD_API_KEY": "espr_sJ5bHBg2o3itM_VAYeFwluP_QkiS2ckh7vnY8NsTVFo"
 			}
 		}
-	},
-	"inputs": [
-		{
-			"type": "promptString",
-			"id": "backboard-api-key",
-			"description": "Backboard API Key",
-			"password": true
-		}
-	]
+	}
 }
