@@ -15,13 +15,13 @@ Build a safe image-library trimming utility with:
 ## 2.1 Command
 
 ```bash
-caesim cut <path> [--cut-rule <text>] [--cut-img <image>] [--dry-run] [--cut-dir <name>] [--report <file>]
+caesim cut <path> [--rule <text>] [--cut-img <image>] [--dry-run] [--cut-dir <name>] [--report <file>]
 ```
 
 ## 2.2 Arguments
 
 1. `<path>`: root folder to scan
-2. `--cut-rule`: plain-language rule (stored in report)
+2. `--rule`: plain-language rule (stored in report); `--cut-rule` remains as a compatibility alias
 2. `--cut-img`: filter out all images containing the given image (stored in report)
 3. `--dry-run`: preview matches without moving files
 4. `--cut-dir`: default `cut`
@@ -79,18 +79,21 @@ Start simple and deterministic:
 
 Keep rule processing modular so we can add model-based classification later.
 
-## 4.1 Backboard AI Integration (optional, post-run + advanced rules)
+## 4.1 AI Integration (later, optional)
 
-Backboard is **not required** for the MVP deterministic CLI. It becomes useful in two places:
+Backboard is **not required** for the MVP deterministic CLI. For the first executable,
+keep the product local and deterministic, with only the optional Python Vision backend
+behind an explicit `--vision` flag. A later provider integration may become useful in
+two places:
 
 1. **Advanced semantic cut rules (optional provider)**:
-   - When rules go beyond filenames/hashes/basic image stats (e.g. “contains faces”, “contains receipts”, “private info”, “memes”, “screenshots of chats”, “bad composition”), route scoring through a Backboard-powered classifier/assistant.
-   - Keep the local pipeline unchanged: Backboard should return structured labels/tags + confidence so we can map them to deterministic `reason` strings in the report.
+   - When rules go beyond filenames/hashes/basic image stats (e.g. “contains faces”, “contains receipts”, “private info”, “memes”, “screenshots of chats”, “bad composition”), route scoring through a provider-backed classifier/assistant.
+   - Keep the local pipeline unchanged: the provider should return structured labels/tags + confidence so we can map them to deterministic `reason` strings in the report.
    - This is the main future source of “real cost”, so it must plug into the complexity/cost gating flow.
 
-2. **Post-run chatbot for cleanup + explanation**:
+2. **Post-run assistant for cleanup + explanation**:
    - After a run completes, treat the report (`.caesim-report.json`) as the primary artifact.
-   - A Backboard assistant can answer questions like “why was this cut?”, “group by reason”, “suggest a safer rule”, or “show me borderline items”, using the report contents (and later, user preferences via memory).
+   - An assistant can answer questions like “why was this cut?”, “group by reason”, “suggest a safer rule”, or “show me borderline items”, using the report contents.
    - This mode is “assistive” and should never move/delete files by itself; it only proposes actions or generates a follow-up command invocation.
 
 ## 5. Data Outputs

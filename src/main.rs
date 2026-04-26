@@ -10,7 +10,11 @@ use std::process::{Command, Stdio};
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
-#[command(name = "caesim", version, about = "Safe image-library trimming utility")]
+#[command(
+    name = "caesim",
+    version,
+    about = "Safe image-library trimming utility"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -28,7 +32,7 @@ struct CutArgs {
     path: PathBuf,
 
     /// Plain-language rule (stored in report)
-    #[arg(long = "cut-rule")]
+    #[arg(long = "rule", alias = "cut-rule")]
     cut_rule: Option<String>,
 
     /// Filter out all images "containing" the given image (stored in report)
@@ -217,11 +221,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         for (idx, src) in matched.iter().enumerate() {
             let dest = unique_destination(&cut_dir_path, src)?;
             fs::rename(src, &dest).with_context(|| {
-                format!(
-                    "failed to move {} -> {}",
-                    src.display(),
-                    dest.display()
-                )
+                format!("failed to move {} -> {}", src.display(), dest.display())
             })?;
             moved_count += 1;
 
@@ -253,11 +253,9 @@ fn run_cut(args: CutArgs) -> Result<()> {
 fn discover_images(root: &Path, cut_dir_name: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let cut_dir = root.join(cut_dir_name);
-    let exts: HashSet<&'static str> = [
-        "jpg", "jpeg", "png", "webp", "heic", "tiff", "gif",
-    ]
-    .into_iter()
-    .collect();
+    let exts: HashSet<&'static str> = ["jpg", "jpeg", "png", "webp", "heic", "tiff", "gif"]
+        .into_iter()
+        .collect();
 
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
@@ -301,10 +299,7 @@ fn unique_destination(cut_dir: &Path, src: &Path) -> Result<PathBuf> {
     if !dest.exists() {
         return Ok(dest);
     }
-    let stem = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("file");
+    let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
     let ext = src.extension().and_then(|e| e.to_str()).unwrap_or("");
     for i in 1..10_000u32 {
         let candidate = if ext.is_empty() {
@@ -363,12 +358,14 @@ fn estimate_complexity(image_count: usize, vision_enabled: bool) -> ComplexityEs
 
 fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
     let mut cmd = Command::new("python3");
-    cmd.arg("python/vision_backend.py")
+    cmd.arg(find_vision_backend()?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn().context("failed to start python vision backend")?;
+    let mut child = cmd
+        .spawn()
+        .context("failed to start python vision backend")?;
     {
         let stdin = child
             .stdin
@@ -397,3 +394,32 @@ fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImage
         .collect())
 }
 
+fn find_vision_backend() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("CAESIM_VISION_BACKEND") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(anyhow!(
+            "CAESIM_VISION_BACKEND does not exist: {}",
+            path.display()
+        ));
+    }
+
+    let mut candidates = vec![PathBuf::from("python/vision_backend.py")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("python/vision_backend.py"));
+            candidates.push(dir.join("../python/vision_backend.py"));
+        }
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| {
+            anyhow!(
+                "could not find python/vision_backend.py; set CAESIM_VISION_BACKEND to its path"
+            )
+        })
+}

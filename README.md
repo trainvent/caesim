@@ -22,7 +22,7 @@ The public site frames Caesim as:
 Example command concept:
 
 ```bash
-caesim cut ./my-photos --rule "screenshots"
+caesim cut ./my-photos --rule screenshots
 ```
 
 ## MVP Scope
@@ -45,14 +45,35 @@ caesim cut ./my-photos --rule "screenshots"
 
 ## Status
 
-Documentation phase. Build recipe is in [DEVELOPER.md](/home/leonmarq/Code/caesim/DEVELOPER.md).
+Early executable MVP. Build recipe is in [DEVELOPER.md](/home/leonmarq/Code/caesim/DEVELOPER.md).
+
+## Install / Run
+
+Build the local executable:
+
+```bash
+cargo build
+```
+
+Run it from the repo:
+
+```bash
+cargo run -- cut ./my-photos --rule screenshots --dry-run
+```
+
+Or install the `caesim` command from this checkout:
+
+```bash
+cargo install --path .
+caesim cut ./my-photos --rule screenshots --dry-run
+```
 
 ## Dev quickstart (Rust + optional Python Vision)
 
 ### Local-only run (no AI)
 
 ```bash
-cargo run -- cut ./my-photos --cut-rule screenshots --dry-run
+cargo run -- cut ./my-photos --rule screenshots --dry-run
 ```
 
 ### Google Cloud Vision (optional backend)
@@ -71,7 +92,7 @@ pip install -r requirements.txt
 - Run with Vision enabled:
 
 ```bash
-cargo run -- cut ./my-photos --cut-rule explicit --vision --dry-run
+cargo run -- cut ./my-photos --rule explicit --vision --dry-run
 ```
 
 Note: the first `cargo build` / `cargo run` needs access to `crates.io` to download Rust dependencies.
