@@ -76,6 +76,7 @@ struct RunReport {
     cut_dir: String,
     complexity: ComplexityEstimate,
     entries: Vec<ReportEntry>,
+    vision_errors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -101,6 +102,7 @@ struct VisionImageResult {
     web_partial_matches: Vec<String>,
     web_best_guess_labels: Vec<String>,
     dominant_colors: Vec<String>,
+    errors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -286,6 +288,19 @@ fn run_cut(args: CutArgs) -> Result<()> {
         cut_dir: cut_dir_path.to_string_lossy().to_string(),
         complexity,
         entries,
+        vision_errors: {
+            let mut v: Vec<String> = Vec::new();
+            if let Some(vm) = vision_map.as_ref() {
+                for (p, vr) in vm.iter() {
+                    for err in &vr.errors {
+                        if !err.is_empty() {
+                            v.push(format!("{}: {}", p, err));
+                        }
+                    }
+                }
+            }
+            v
+        },
     };
 
     write_report(&report_path, &report)?;
