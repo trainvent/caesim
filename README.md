@@ -4,7 +4,7 @@ Caesim is a small CLI-style concept for trimming large image libraries.
 
 Core idea:
 
-1. You describe which images you do not want (for example: screenshots, duplicates, low-quality shots).
+1. You describe which images you do not want (for example: screenshots, duplicates, landscape, portrait, low-quality shots).
 2. Caesim scans a folder and finds matches.
 3. Matches are moved into a separate `cut` folder for review, or to a custom folder with `--destination`.
 4. Nothing is hard-deleted by default.
@@ -59,6 +59,18 @@ Run it from the repo:
 
 ```bash
 cargo run -- cut ./my-photos --rule screenshots --dry-run
+```
+
+Cut landscape photos into a review folder:
+
+```bash
+cargo run -- cut ./my-photos --rule landscape --destination ./review --dry-run
+```
+
+Cut portrait photos:
+
+```bash
+cargo run -- cut ./my-photos --rule portrait --dry-run
 ```
 
 Send matches into a custom folder:

@@ -31,7 +31,7 @@ struct CutArgs {
     /// Root folder to scan
     path: PathBuf,
 
-    /// Local rule (for example: screenshots, duplicates, explicit)
+    /// Local rule (for example: screenshots, duplicates, explicit, landscape, portrait)
     #[arg(long = "rule", alias = "cut-rule")]
     cut_rule: Option<String>,
 
@@ -204,12 +204,13 @@ fn run_cut(args: CutArgs) -> Result<()> {
         let mut reasons: Vec<String> = Vec::new();
 
         if let Some(rule) = args.cut_rule.as_deref() {
-            if rule.trim().eq_ignore_ascii_case("screenshots") {
+            let normalized_rule = rule.trim().to_ascii_lowercase();
+            if normalized_rule == "screenshots" {
                 if is_screenshot_name(img) {
                     reasons.push("screenshot_pattern".to_string());
                 }
             }
-            if rule.trim().eq_ignore_ascii_case("duplicates") {
+            if normalized_rule == "duplicates" {
                 if let Ok(hash) = sha256_file(img) {
                     if let Some(first_path) = seen_hashes.get(&hash) {
                         reasons.push(format!(
@@ -233,7 +234,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
                     ));
                 }
             }
-            if rule.trim().eq_ignore_ascii_case("explicit") && args.vision {
+            if normalized_rule == "explicit" && args.vision {
                 if let Some(vm) = &vision_map {
                     if let Some(vr) = vm.get(&img.to_string_lossy().to_string()) {
                         if let Some(ss) = &vr.safe_search {
@@ -248,6 +249,11 @@ fn run_cut(args: CutArgs) -> Result<()> {
                             }
                         }
                     }
+                }
+            }
+            if normalized_rule == "landscape" || normalized_rule == "portrait" {
+                if let Ok(true) = image_matches_orientation(img, &normalized_rule) {
+                    reasons.push(format!("orientation_{normalized_rule}"));
                 }
             }
         }
@@ -275,17 +281,6 @@ fn run_cut(args: CutArgs) -> Result<()> {
                 destination: None,
                 reason: reasons.join(","),
             });
-        }
-
-        if args.vision {
-            if let Some(query) = args.contains.as_deref() {
-                if let Some(vr) = vision_map.as_ref().and_then(|m| m.get(&img.to_string_lossy().to_string())) {
-                    let matched_labels = matching_vision_labels(query, &vr.labels);
-                    if !matched_labels.is_empty() {
-                        reasons.push(format!("vision_contains_match:{}", matched_labels.join("|")));
-                    }
-                }
-            }
         }
     }
 
@@ -641,6 +636,20 @@ fn vision_features_for_rule(rule: &str) -> Vec<String> {
     Vec::new()
 }
 
+fn image_matches_orientation(path: &Path, rule: &str) -> Result<bool> {
+    let (width, height) = image::image_dimensions(path)
+        .with_context(|| format!("failed to read image dimensions for {}", path.display()))?;
+    Ok(orientation_matches_dimensions(width, height, rule))
+}
+
+fn orientation_matches_dimensions(width: u32, height: u32, rule: &str) -> bool {
+    match rule.trim().to_ascii_lowercase().as_str() {
+        "landscape" => width > height,
+        "portrait" => height > width,
+        _ => false,
+    }
+}
+
 fn matching_vision_labels(query: &str, labels: &[String]) -> Vec<String> {
     let query_tokens = normalized_words(query);
     if query_tokens.is_empty() {
@@ -869,6 +878,16 @@ mod tests {
             vec!["Fast food".to_string()]
         );
         assert!(matching_vision_labels("receipt", &labels).is_empty());
+    }
+
+    #[test]
+    fn matches_orientation_by_dimensions() {
+        assert!(orientation_matches_dimensions(1920, 1080, "landscape"));
+        assert!(!orientation_matches_dimensions(1080, 1920, "landscape"));
+        assert!(orientation_matches_dimensions(1080, 1920, "portrait"));
+        assert!(!orientation_matches_dimensions(1920, 1080, "portrait"));
+        assert!(!orientation_matches_dimensions(1080, 1080, "landscape"));
+        assert!(!orientation_matches_dimensions(1080, 1080, "portrait"));
     }
 
     fn vision_result(
