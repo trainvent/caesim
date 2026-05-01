@@ -3,3 +3,4 @@ target/
 .venv/
 .caesim-report.json
 start.sh
+assets/test

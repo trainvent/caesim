@@ -28,7 +28,7 @@ caesim cut ./my-photos --rule screenshots
 ## MVP Scope
 
 1. CLI command: `caesim cut <path> --rule "<text>"`
-2. File scanner (recursive image discovery)
+2. File scanner (recursive image discovery for common raster formats plus SVG)
 3. Rule matcher (initially simple heuristics + tags)
 4. Move matched files into `<path>/cut/`
 5. Generate a run report:
@@ -68,6 +68,11 @@ cargo install --path .
 caesim cut ./my-photos --rule screenshots --dry-run
 ```
 
+Duplicate matching detects exact file-content duplicates and common exported-copy
+names such as `image (1).svg` when `image.svg` exists. With `--vision`, Caesim
+also asks Google Cloud Vision for Web Detection, OCR, labels, and dominant colors
+to catch more visually similar duplicates.
+
 ## Dev quickstart (Rust + optional Python Vision)
 
 ### Local-only run (no AI)
@@ -78,7 +83,7 @@ cargo run -- cut ./my-photos --rule screenshots --dry-run
 
 ### Google Cloud Vision (optional backend)
 
-This repo includes a small Python backend (`python/vision_backend.py`) that the Rust CLI can call to label images via **Cloud Vision API**.
+This repo includes a small Python backend (`python/vision_backend.py`) that the Rust CLI can call via **Cloud Vision API**.
 
 - Install deps:
 
@@ -94,6 +99,15 @@ pip install -r requirements.txt
 ```bash
 cargo run -- cut ./my-photos --rule explicit --vision --dry-run
 ```
+
+Use Vision-assisted duplicate detection:
+
+```bash
+cargo run -- cut ./my-photos --rule duplicates --vision --dry-run
+```
+
+Backboard is planned as a report assistant layer: it should read `.caesim-report.json`
+after a run and explain or suggest follow-up commands, but not move files directly.
 
 Note: the first `cargo build` / `cargo run` needs access to `crates.io` to download Rust dependencies.
 

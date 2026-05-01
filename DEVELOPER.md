@@ -73,6 +73,8 @@ Start simple and deterministic:
 2. Metadata-based checks where available:
    - filename patterns (e.g., screenshot naming)
    - exact hash duplicates
+   - common exported-copy names (e.g., `image (1).svg` when `image.svg` exists)
+   - optional Google Vision duplicate signals behind `--vision`
 3. Image-stat placeholders:
    - brightness threshold
    - blur score threshold
@@ -81,9 +83,10 @@ Keep rule processing modular so we can add model-based classification later.
 
 ## 4.1 AI Integration (later, optional)
 
-Backboard is **not required** for the MVP deterministic CLI. For the first executable,
-keep the product local and deterministic, with only the optional Python Vision backend
-behind an explicit `--vision` flag. A later provider integration may become useful in
+Backboard is **not required** for the MVP deterministic CLI or image recognition.
+Keep the product local and deterministic by default, with only the optional Python
+Google Vision backend behind an explicit `--vision` flag. A later Backboard integration
+may become useful in
 two places:
 
 1. **Advanced semantic cut rules (optional provider)**:

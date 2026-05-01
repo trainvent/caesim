@@ -97,6 +97,10 @@ struct VisionImageResult {
     labels: Vec<String>,
     safe_search: Option<HashMap<String, String>>,
     text: Option<String>,
+    web_full_matches: Vec<String>,
+    web_partial_matches: Vec<String>,
+    web_best_guess_labels: Vec<String>,
+    dominant_colors: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -124,6 +128,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
 
     // discover images
     let images = discover_images(&target, &args.cut_dir)?;
+    let image_paths: HashSet<PathBuf> = images.iter().cloned().collect();
 
     // complexity estimate (deterministic, no money)
     let complexity = estimate_complexity(images.len(), args.vision);
@@ -134,20 +139,29 @@ fn run_cut(args: CutArgs) -> Result<()> {
         images.len()
     );
 
-    // Optional: call python vision backend to get labels/safesearch/text
+    // Optional: call python vision backend to get labels/safesearch/text/web/image properties.
     let vision_map = if args.vision {
-        // Keep it simple: label + safe_search for the initial example.
         let req = VisionRequest {
             images: images
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
-            features: vec!["LABEL_DETECTION".into(), "SAFE_SEARCH_DETECTION".into()],
+            features: vec![
+                "LABEL_DETECTION".into(),
+                "SAFE_SEARCH_DETECTION".into(),
+                "TEXT_DETECTION".into(),
+                "WEB_DETECTION".into(),
+                "IMAGE_PROPERTIES".into(),
+            ],
         };
         Some(call_python_vision(&req)?)
     } else {
         None
     };
+    let vision_duplicate_sources = vision_map
+        .as_ref()
+        .map(|vm| build_vision_duplicate_sources(&images, vm))
+        .unwrap_or_default();
 
     let cut_dir_path = target.join(&args.cut_dir);
     let report_path = args
@@ -181,6 +195,18 @@ fn run_cut(args: CutArgs) -> Result<()> {
                     } else {
                         seen_hashes.insert(hash, img.clone());
                     }
+                }
+                if let Some(original_path) = duplicate_copy_source(img, &image_paths) {
+                    reasons.push(format!(
+                        "duplicate_filename_copy_of:{}",
+                        original_path.to_string_lossy()
+                    ));
+                }
+                if let Some((original_path, signal)) = vision_duplicate_sources.get(img) {
+                    reasons.push(format!(
+                        "vision_duplicate_{signal}_of:{}",
+                        original_path.to_string_lossy()
+                    ));
                 }
             }
             if rule.trim().eq_ignore_ascii_case("explicit") && args.vision {
@@ -246,6 +272,19 @@ fn run_cut(args: CutArgs) -> Result<()> {
     };
 
     write_report(&report_path, &report)?;
+    if args.dry_run {
+        eprintln!(
+            "Matched {} image(s); dry run, moved 0.",
+            report.matched_count
+        );
+    } else {
+        eprintln!(
+            "Matched {} image(s); moved {} into {}.",
+            report.matched_count,
+            report.moved_count,
+            cut_dir_path.display()
+        );
+    }
     eprintln!("Wrote report: {}", report_path.display());
     Ok(())
 }
@@ -253,9 +292,11 @@ fn run_cut(args: CutArgs) -> Result<()> {
 fn discover_images(root: &Path, cut_dir_name: &str) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     let cut_dir = root.join(cut_dir_name);
-    let exts: HashSet<&'static str> = ["jpg", "jpeg", "png", "webp", "heic", "tiff", "gif"]
-        .into_iter()
-        .collect();
+    let exts: HashSet<&'static str> = [
+        "jpg", "jpeg", "png", "webp", "heic", "tiff", "gif", "avif", "svg",
+    ]
+    .into_iter()
+    .collect();
 
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
@@ -272,6 +313,7 @@ fn discover_images(root: &Path, cut_dir_name: &str) -> Result<Vec<PathBuf>> {
             }
         }
     }
+    out.sort();
     Ok(out)
 }
 
@@ -289,6 +331,154 @@ fn sha256_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn duplicate_copy_source(path: &Path, image_paths: &HashSet<PathBuf>) -> Option<PathBuf> {
+    let stem = path.file_stem()?.to_str()?;
+    let original_stem = strip_duplicate_copy_suffix(stem)?;
+    let extension = path.extension().and_then(|e| e.to_str());
+    let original_filename = match extension {
+        Some(ext) if !ext.is_empty() => format!("{original_stem}.{ext}"),
+        _ => original_stem.to_string(),
+    };
+    let original_path = path.with_file_name(original_filename);
+
+    if original_path != path && image_paths.contains(&original_path) {
+        Some(original_path)
+    } else {
+        None
+    }
+}
+
+fn build_vision_duplicate_sources(
+    images: &[PathBuf],
+    vision_map: &HashMap<String, VisionImageResult>,
+) -> HashMap<PathBuf, (PathBuf, String)> {
+    let mut seen: HashMap<String, PathBuf> = HashMap::new();
+    let mut duplicates: HashMap<PathBuf, (PathBuf, String)> = HashMap::new();
+
+    for image in images {
+        let image_key = image.to_string_lossy().to_string();
+        let Some(result) = vision_map.get(&image_key) else {
+            continue;
+        };
+
+        for (key, signal) in vision_duplicate_keys(result) {
+            if let Some(first_path) = seen.get(&key) {
+                duplicates
+                    .entry(image.clone())
+                    .or_insert_with(|| (first_path.clone(), signal));
+            } else {
+                seen.insert(key, image.clone());
+            }
+        }
+    }
+
+    duplicates
+}
+
+fn vision_duplicate_keys(result: &VisionImageResult) -> Vec<(String, String)> {
+    let mut keys = Vec::new();
+
+    for url in &result.web_full_matches {
+        if !url.trim().is_empty() {
+            keys.push((
+                format!("web-full:{}", url.trim()),
+                "web_full_match".to_string(),
+            ));
+        }
+    }
+
+    for url in &result.web_partial_matches {
+        if !url.trim().is_empty() {
+            keys.push((
+                format!("web-partial:{}", url.trim()),
+                "web_partial_match".to_string(),
+            ));
+        }
+    }
+
+    if let Some(text_key) = normalized_text_duplicate_key(result.text.as_deref()) {
+        keys.push((format!("ocr:{text_key}"), "ocr_text_match".to_string()));
+    }
+
+    if result.labels.len() >= 4 && result.dominant_colors.len() >= 3 {
+        let labels = result
+            .labels
+            .iter()
+            .take(6)
+            .map(|label| label.trim().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("|");
+        let colors = result
+            .dominant_colors
+            .iter()
+            .take(4)
+            .map(|color| color.trim().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join("|");
+        if !labels.is_empty() && !colors.is_empty() {
+            keys.push((
+                format!("signature:{labels}:{colors}"),
+                "signature_match".to_string(),
+            ));
+        }
+    }
+
+    keys
+}
+
+fn normalized_text_duplicate_key(text: Option<&str>) -> Option<String> {
+    let normalized = text?
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() {
+                Some(c.to_ascii_lowercase())
+            } else if c.is_whitespace() {
+                Some(' ')
+            } else {
+                None
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if normalized.len() >= 32 {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn strip_duplicate_copy_suffix(stem: &str) -> Option<&str> {
+    if let Some(before_suffix) = stem.strip_suffix(" copy") {
+        return non_empty_trimmed(before_suffix);
+    }
+    if let Some(before_suffix) = stem.strip_suffix("- copy") {
+        return non_empty_trimmed(before_suffix);
+    }
+    if let Some(before_suffix) = stem.strip_suffix("_copy") {
+        return non_empty_trimmed(before_suffix);
+    }
+
+    let (before_close, _) = stem.rsplit_once(')')?;
+    let (before_open, number) = before_close.rsplit_once('(')?;
+    if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+        return non_empty_trimmed(before_open);
+    }
+
+    None
+}
+
+fn non_empty_trimmed(value: &str) -> Option<&str> {
+    let trimmed = value.trim_end_matches([' ', '-', '_']);
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
+    }
 }
 
 fn unique_destination(cut_dir: &Path, src: &Path) -> Result<PathBuf> {
@@ -357,7 +547,7 @@ fn estimate_complexity(image_count: usize, vision_enabled: bool) -> ComplexityEs
 }
 
 fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
-    let mut cmd = Command::new("python3");
+    let mut cmd = Command::new(find_python()?);
     cmd.arg(find_vision_backend()?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -394,6 +584,24 @@ fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImage
         .collect())
 }
 
+fn find_python() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("CAESIM_PYTHON") {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(anyhow!("CAESIM_PYTHON does not exist: {}", path.display()));
+    }
+
+    for candidate in [PathBuf::from(".venv/bin/python"), PathBuf::from("python3")] {
+        if candidate.exists() || candidate.as_os_str() == "python3" {
+            return Ok(candidate);
+        }
+    }
+
+    Ok(PathBuf::from("python3"))
+}
+
 fn find_vision_backend() -> Result<PathBuf> {
     if let Ok(path) = std::env::var("CAESIM_VISION_BACKEND") {
         let path = PathBuf::from(path);
@@ -422,4 +630,99 @@ fn find_vision_backend() -> Result<PathBuf> {
                 "could not find python/vision_backend.py; set CAESIM_VISION_BACKEND to its path"
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_numbered_duplicate_copy_names() {
+        assert_eq!(strip_duplicate_copy_suffix("penrose (1)"), Some("penrose"));
+        assert_eq!(strip_duplicate_copy_suffix("penrose (12)"), Some("penrose"));
+        assert_eq!(strip_duplicate_copy_suffix("penrose copy"), Some("penrose"));
+        assert_eq!(
+            strip_duplicate_copy_suffix("penrose- copy"),
+            Some("penrose")
+        );
+        assert_eq!(strip_duplicate_copy_suffix("penrose_copy"), Some("penrose"));
+        assert_eq!(strip_duplicate_copy_suffix("penrose (final)"), None);
+    }
+
+    #[test]
+    fn finds_original_path_for_duplicate_copy_name() {
+        let root = PathBuf::from("/tmp/caesim-test");
+        let original = root.join("penrose.svg");
+        let copy = root.join("penrose (1).svg");
+        let paths = HashSet::from([original.clone(), copy.clone()]);
+
+        assert_eq!(duplicate_copy_source(&copy, &paths), Some(original));
+        assert_eq!(
+            duplicate_copy_source(&root.join("missing (1).svg"), &paths),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_vision_duplicate_from_shared_full_web_match() {
+        let first = PathBuf::from("/tmp/caesim-test/first.jpg");
+        let second = PathBuf::from("/tmp/caesim-test/second.jpg");
+        let images = vec![first.clone(), second.clone()];
+        let vision_map = HashMap::from([
+            (
+                first.to_string_lossy().to_string(),
+                vision_result(
+                    &first,
+                    vec!["https://example.com/same-image.jpg"],
+                    vec![],
+                    None,
+                ),
+            ),
+            (
+                second.to_string_lossy().to_string(),
+                vision_result(
+                    &second,
+                    vec!["https://example.com/same-image.jpg"],
+                    vec![],
+                    None,
+                ),
+            ),
+        ]);
+
+        let duplicates = build_vision_duplicate_sources(&images, &vision_map);
+        assert_eq!(
+            duplicates.get(&second),
+            Some(&(first, "web_full_match".to_string()))
+        );
+    }
+
+    #[test]
+    fn normalizes_long_ocr_text_for_duplicate_detection() {
+        assert_eq!(
+            normalized_text_duplicate_key(Some("Invoice #123\nTotal: EUR 42.00, thank you")),
+            Some("invoice 123 total eur 4200 thank you".to_string())
+        );
+        assert_eq!(normalized_text_duplicate_key(Some("too short")), None);
+    }
+
+    fn vision_result(
+        path: &Path,
+        web_full_matches: Vec<&str>,
+        web_partial_matches: Vec<&str>,
+        text: Option<&str>,
+    ) -> VisionImageResult {
+        VisionImageResult {
+            path: path.to_string_lossy().to_string(),
+            labels: Vec::new(),
+            safe_search: None,
+            text: text.map(str::to_string),
+            web_full_matches: web_full_matches.into_iter().map(str::to_string).collect(),
+            web_partial_matches: web_partial_matches
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            web_best_guess_labels: Vec::new(),
+            dominant_colors: Vec::new(),
+        }
+    }
 }
