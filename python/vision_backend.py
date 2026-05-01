@@ -25,7 +25,11 @@ def main() -> int:
         return write_response([empty_result(p) for p in images])
 
     try:
-        client = vision.ImageAnnotatorClient()
+        transport = os.environ.get("CAESIM_VISION_TRANSPORT")
+        if transport:
+            client = vision.ImageAnnotatorClient(transport=transport)
+        else:
+            client = vision.ImageAnnotatorClient()
     except Exception as e:
         sys.stderr.write(
             f"Vision client init failed (credentials?): {e}; returning empty results\n"
@@ -90,7 +94,9 @@ def analyze_images(
         return [empty_result(path) for path in paths]
 
     out: List[Dict[str, Any]] = []
-    chunk_size = 8
+    chunk_size = int(os.environ.get("CAESIM_VISION_CHUNK_SIZE", "8"))
+    timeout = float(os.environ.get("CAESIM_VISION_TIMEOUT", "20"))
+    chunk_size = max(1, chunk_size)
     for start in range(0, len(paths), chunk_size):
         chunk_paths = paths[start : start + chunk_size]
         requests = []
@@ -125,10 +131,16 @@ def analyze_images(
             continue
 
         try:
+            end = min(start + len(chunk_paths), len(paths))
+            sys.stderr.write(
+                f"Google Vision analyzing images {start + 1}-{end}/{len(paths)} "
+                f"({len(requests)} request(s), timeout={timeout:g}s)\n"
+            )
+            sys.stderr.flush()
             response = client.batch_annotate_images(
                 requests=requests,
                 retry=None,
-                timeout=20,
+                timeout=timeout,
             )
         except Exception as e:
             for path in request_paths:

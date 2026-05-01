@@ -70,8 +70,9 @@ caesim cut ./my-photos --rule screenshots --dry-run
 
 Duplicate matching detects exact file-content duplicates and common exported-copy
 names such as `image (1).svg` when `image.svg` exists. With `--vision`, Caesim
-also asks Google Cloud Vision for Web Detection, OCR, labels, and dominant colors
-to catch more visually similar duplicates.
+uses Google Cloud Vision signals for richer matching. `duplicates` asks for web
+matches, OCR, labels, and dominant colors; object rules such as `food` only ask
+for label detection.
 
 ## Dev quickstart (Rust + optional Python Vision)
 
@@ -104,6 +105,12 @@ Use Vision-assisted duplicate detection:
 
 ```bash
 cargo run -- cut ./my-photos --rule duplicates --vision --dry-run
+```
+
+Use Vision label detection for object-style filtering:
+
+```bash
+cargo run -- cut ./my-photos --rule food --vision --dry-run
 ```
 
 Backboard is planned as a report assistant layer: it should read `.caesim-report.json`

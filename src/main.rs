@@ -139,20 +139,25 @@ fn run_cut(args: CutArgs) -> Result<()> {
         images.len()
     );
 
+    let vision_features = args
+        .cut_rule
+        .as_deref()
+        .map(vision_features_for_rule)
+        .unwrap_or_else(Vec::new);
+
     // Optional: call python vision backend to get labels/safesearch/text/web/image properties.
     let vision_map = if args.vision {
+        eprintln!(
+            "Running Google Vision analysis with {} feature(s): {}",
+            vision_features.len(),
+            vision_features.join(",")
+        );
         let req = VisionRequest {
             images: images
                 .iter()
                 .map(|p| p.to_string_lossy().to_string())
                 .collect(),
-            features: vec![
-                "LABEL_DETECTION".into(),
-                "SAFE_SEARCH_DETECTION".into(),
-                "TEXT_DETECTION".into(),
-                "WEB_DETECTION".into(),
-                "IMAGE_PROPERTIES".into(),
-            ],
+            features: vision_features.clone(),
         };
         Some(call_python_vision(&req)?)
     } else {
@@ -222,6 +227,18 @@ fn run_cut(args: CutArgs) -> Result<()> {
                             if flagged {
                                 reasons.push("vision_safe_search_flag".to_string());
                             }
+                        }
+                    }
+                }
+            }
+            if args.vision && uses_vision_label_rule(rule) {
+                if let Some(vm) = &vision_map {
+                    if let Some(vr) = vm.get(&img.to_string_lossy().to_string()) {
+                        let query = vision_label_query(rule);
+                        let matched_labels = matching_vision_labels(&query, &vr.labels);
+                        if !matched_labels.is_empty() {
+                            reasons
+                                .push(format!("vision_label_match:{}", matched_labels.join("|")));
                         }
                     }
                 }
@@ -546,6 +563,79 @@ fn estimate_complexity(image_count: usize, vision_enabled: bool) -> ComplexityEs
     ComplexityEstimate { score, tier, notes }
 }
 
+fn vision_features_for_rule(rule: &str) -> Vec<String> {
+    let normalized = rule.trim().to_ascii_lowercase();
+    if normalized == "duplicates" {
+        return vec![
+            "LABEL_DETECTION".into(),
+            "TEXT_DETECTION".into(),
+            "WEB_DETECTION".into(),
+            "IMAGE_PROPERTIES".into(),
+        ];
+    }
+    if normalized == "explicit" {
+        return vec!["SAFE_SEARCH_DETECTION".into()];
+    }
+    if uses_vision_label_rule(rule) {
+        return vec!["LABEL_DETECTION".into()];
+    }
+    Vec::new()
+}
+
+fn uses_vision_label_rule(rule: &str) -> bool {
+    let normalized = rule.trim().to_ascii_lowercase();
+    !(normalized.is_empty()
+        || normalized == "screenshots"
+        || normalized == "duplicates"
+        || normalized == "explicit")
+}
+
+fn vision_label_query(rule: &str) -> String {
+    let normalized = rule.trim().to_ascii_lowercase();
+    for prefix in ["containing ", "contains ", "contain "] {
+        if let Some(rest) = normalized.strip_prefix(prefix) {
+            return rest.trim().to_string();
+        }
+    }
+    normalized
+}
+
+fn matching_vision_labels(query: &str, labels: &[String]) -> Vec<String> {
+    let query_tokens = normalized_words(query);
+    if query_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    labels
+        .iter()
+        .filter(|label| {
+            let label_tokens = normalized_words(label);
+            query_tokens.iter().all(|query_token| {
+                label_tokens
+                    .iter()
+                    .any(|label_token| label_token == query_token)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
+fn normalized_words(value: &str) -> Vec<String> {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
 fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
     let mut cmd = Command::new(find_python()?);
     cmd.arg(find_vision_backend()?)
@@ -703,6 +793,38 @@ mod tests {
             Some("invoice 123 total eur 4200 thank you".to_string())
         );
         assert_eq!(normalized_text_duplicate_key(Some("too short")), None);
+    }
+
+    #[test]
+    fn object_rules_use_only_label_detection() {
+        assert_eq!(vision_features_for_rule("food"), vec!["LABEL_DETECTION"]);
+        assert_eq!(
+            vision_features_for_rule("containing food"),
+            vec!["LABEL_DETECTION"]
+        );
+        assert_eq!(
+            vision_features_for_rule("explicit"),
+            vec!["SAFE_SEARCH_DETECTION"]
+        );
+    }
+
+    #[test]
+    fn matches_object_rule_against_vision_labels() {
+        let labels = vec![
+            "Food".to_string(),
+            "Fast food".to_string(),
+            "Tableware".to_string(),
+        ];
+
+        assert_eq!(
+            matching_vision_labels("food", &labels),
+            vec!["Food".to_string(), "Fast food".to_string()]
+        );
+        assert_eq!(
+            matching_vision_labels("fast food", &labels),
+            vec!["Fast food".to_string()]
+        );
+        assert!(matching_vision_labels("receipt", &labels).is_empty());
     }
 
     fn vision_result(
