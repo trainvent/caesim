@@ -39,6 +39,10 @@ struct CutArgs {
     #[arg(long = "contains")]
     contains: Option<String>,
 
+    /// Folder to move matched files into (defaults to <path>/cut)
+    #[arg(long = "destination")]
+    destination: Option<PathBuf>,
+
     /// Filter out all images "containing" the given image (stored in report)
     /// (placeholder; not implemented in MVP)
     #[arg(long = "cut-img")]
@@ -74,6 +78,7 @@ struct RunReport {
     target_path: String,
     rule: Option<String>,
     contains: Option<String>,
+    destination: Option<String>,
     dry_run: bool,
     scanned_count: usize,
     matched_count: usize,
@@ -133,8 +138,13 @@ fn run_cut(args: CutArgs) -> Result<()> {
     let target = fs::canonicalize(&args.path)
         .with_context(|| format!("failed to canonicalize {}", args.path.display()))?;
 
-    // discover images
-    let images = discover_images(&target, &args.cut_dir)?;
+    // resolve destination and discover images
+    let cut_dir_path = resolve_destination(&target, args.destination.as_ref(), &args.cut_dir)?;
+    let mut skip_dirs = vec![target.join(&args.cut_dir)];
+    if cut_dir_path.starts_with(&target) {
+        skip_dirs.push(cut_dir_path.clone());
+    }
+    let images = discover_images(&target, &skip_dirs)?;
     let image_paths: HashSet<PathBuf> = images.iter().cloned().collect();
 
     // complexity estimate (deterministic, no money)
@@ -178,7 +188,6 @@ fn run_cut(args: CutArgs) -> Result<()> {
         .map(|vm| build_vision_duplicate_sources(&images, vm))
         .unwrap_or_default();
 
-    let cut_dir_path = target.join(&args.cut_dir);
     let report_path = args
         .report
         .clone()
@@ -305,6 +314,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         target_path: target.to_string_lossy().to_string(),
         rule: args.cut_rule.clone(),
         contains: args.contains.clone(),
+        destination: Some(cut_dir_path.to_string_lossy().to_string()),
         dry_run: args.dry_run,
         scanned_count: images.len(),
         matched_count: matched.len(),
@@ -345,9 +355,8 @@ fn run_cut(args: CutArgs) -> Result<()> {
     Ok(())
 }
 
-fn discover_images(root: &Path, cut_dir_name: &str) -> Result<Vec<PathBuf>> {
+fn discover_images(root: &Path, skip_dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
-    let cut_dir = root.join(cut_dir_name);
     let exts: HashSet<&'static str> = [
         "jpg", "jpeg", "png", "webp", "heic", "tiff", "gif", "avif", "svg",
     ]
@@ -357,7 +366,7 @@ fn discover_images(root: &Path, cut_dir_name: &str) -> Result<Vec<PathBuf>> {
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
         let path = entry.path();
-        if path == cut_dir || path.starts_with(&cut_dir) {
+        if skip_dirs.iter().any(|skip| path == skip || path.starts_with(skip)) {
             continue;
         }
         if entry.file_type().is_file() {
@@ -371,6 +380,20 @@ fn discover_images(root: &Path, cut_dir_name: &str) -> Result<Vec<PathBuf>> {
     }
     out.sort();
     Ok(out)
+}
+
+fn resolve_destination(
+    target: &Path,
+    destination: Option<&PathBuf>,
+    cut_dir: &str,
+) -> Result<PathBuf> {
+    match destination {
+        Some(dest) if dest.is_absolute() => Ok(dest.clone()),
+        Some(dest) => Ok(std::env::current_dir()
+            .context("failed to read current directory")?
+            .join(dest)),
+        None => Ok(target.join(cut_dir)),
+    }
 }
 
 fn is_screenshot_name(path: &Path) -> bool {
