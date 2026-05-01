@@ -31,9 +31,13 @@ struct CutArgs {
     /// Root folder to scan
     path: PathBuf,
 
-    /// Plain-language rule (stored in report)
+    /// Local rule (for example: screenshots, duplicates, explicit)
     #[arg(long = "rule", alias = "cut-rule")]
     cut_rule: Option<String>,
+
+    /// Vision label query like "food" or "receipt"
+    #[arg(long = "contains")]
+    contains: Option<String>,
 
     /// Filter out all images "containing" the given image (stored in report)
     /// (placeholder; not implemented in MVP)
@@ -69,6 +73,7 @@ struct RunReport {
     run_id: String,
     target_path: String,
     rule: Option<String>,
+    contains: Option<String>,
     dry_run: bool,
     scanned_count: usize,
     matched_count: usize,
@@ -141,11 +146,14 @@ fn run_cut(args: CutArgs) -> Result<()> {
         images.len()
     );
 
-    let vision_features = args
+    let mut vision_features = args
         .cut_rule
         .as_deref()
         .map(vision_features_for_rule)
         .unwrap_or_else(Vec::new);
+    if args.contains.is_some() && !vision_features.iter().any(|f| f == "LABEL_DETECTION") {
+        vision_features.push("LABEL_DETECTION".to_string());
+    }
 
     // Optional: call python vision backend to get labels/safesearch/text/web/image properties.
     let vision_map = if args.vision {
@@ -233,14 +241,18 @@ fn run_cut(args: CutArgs) -> Result<()> {
                     }
                 }
             }
-            if args.vision && uses_vision_label_rule(rule) {
+        }
+
+        if args.vision {
+            if let Some(query) = args.contains.as_deref() {
                 if let Some(vm) = &vision_map {
                     if let Some(vr) = vm.get(&img.to_string_lossy().to_string()) {
-                        let query = vision_label_query(rule);
-                        let matched_labels = matching_vision_labels(&query, &vr.labels);
+                        let matched_labels = matching_vision_labels(query, &vr.labels);
                         if !matched_labels.is_empty() {
-                            reasons
-                                .push(format!("vision_label_match:{}", matched_labels.join("|")));
+                            reasons.push(format!(
+                                "vision_contains_match:{}",
+                                matched_labels.join("|")
+                            ));
                         }
                     }
                 }
@@ -254,6 +266,17 @@ fn run_cut(args: CutArgs) -> Result<()> {
                 destination: None,
                 reason: reasons.join(","),
             });
+        }
+
+        if args.vision {
+            if let Some(query) = args.contains.as_deref() {
+                if let Some(vr) = vision_map.as_ref().and_then(|m| m.get(&img.to_string_lossy().to_string())) {
+                    let matched_labels = matching_vision_labels(query, &vr.labels);
+                    if !matched_labels.is_empty() {
+                        reasons.push(format!("vision_contains_match:{}", matched_labels.join("|")));
+                    }
+                }
+            }
         }
     }
 
@@ -281,6 +304,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         run_id: chrono_run_id(),
         target_path: target.to_string_lossy().to_string(),
         rule: args.cut_rule.clone(),
+        contains: args.contains.clone(),
         dry_run: args.dry_run,
         scanned_count: images.len(),
         matched_count: matched.len(),
@@ -591,28 +615,7 @@ fn vision_features_for_rule(rule: &str) -> Vec<String> {
     if normalized == "explicit" {
         return vec!["SAFE_SEARCH_DETECTION".into()];
     }
-    if uses_vision_label_rule(rule) {
-        return vec!["LABEL_DETECTION".into()];
-    }
     Vec::new()
-}
-
-fn uses_vision_label_rule(rule: &str) -> bool {
-    let normalized = rule.trim().to_ascii_lowercase();
-    !(normalized.is_empty()
-        || normalized == "screenshots"
-        || normalized == "duplicates"
-        || normalized == "explicit")
-}
-
-fn vision_label_query(rule: &str) -> String {
-    let normalized = rule.trim().to_ascii_lowercase();
-    for prefix in ["containing ", "contains ", "contain "] {
-        if let Some(rest) = normalized.strip_prefix(prefix) {
-            return rest.trim().to_string();
-        }
-    }
-    normalized
 }
 
 fn matching_vision_labels(query: &str, labels: &[String]) -> Vec<String> {
@@ -811,12 +814,15 @@ mod tests {
     }
 
     #[test]
-    fn object_rules_use_only_label_detection() {
-        assert_eq!(vision_features_for_rule("food"), vec!["LABEL_DETECTION"]);
-        assert_eq!(
-            vision_features_for_rule("containing food"),
-            vec!["LABEL_DETECTION"]
-        );
+    fn rule_features_cover_only_special_cases() {
+        assert_eq!(vision_features_for_rule("food"), Vec::<String>::new());
+        assert_eq!(vision_features_for_rule("screenshots"), Vec::<String>::new());
+        assert_eq!(vision_features_for_rule("duplicates"), vec![
+            "LABEL_DETECTION".to_string(),
+            "TEXT_DETECTION".to_string(),
+            "WEB_DETECTION".to_string(),
+            "IMAGE_PROPERTIES".to_string(),
+        ]);
         assert_eq!(
             vision_features_for_rule("explicit"),
             vec!["SAFE_SEARCH_DETECTION"]
@@ -824,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn matches_object_rule_against_vision_labels() {
+    fn matches_contains_query_against_vision_labels() {
         let labels = vec![
             "Food".to_string(),
             "Fast food".to_string(),
@@ -860,6 +866,7 @@ mod tests {
                 .collect(),
             web_best_guess_labels: Vec::new(),
             dominant_colors: Vec::new(),
+            errors: Vec::new(),
         }
     }
 }

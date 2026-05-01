@@ -6,7 +6,7 @@ Core idea:
 
 1. You describe which images you do not want (for example: screenshots, duplicates, low-quality shots).
 2. Caesim scans a folder and finds matches.
-3. Matches are moved into a separate `cut` folder for review.
+3. Matches are moved into a separate `cut` folder for review, or to a custom folder with `--destination`.
 4. Nothing is hard-deleted by default.
 
 This keeps cleanup fast while preserving a safety review step.
@@ -27,7 +27,7 @@ caesim cut ./my-photos --rule screenshots
 
 ## MVP Scope
 
-1. CLI command: `caesim cut <path> --rule "<text>"`
+1. CLI command: `caesim cut <path> --rule "<text>" [--destination <folder>]`
 2. File scanner (recursive image discovery for common raster formats plus SVG)
 3. Rule matcher (initially simple heuristics + tags)
 4. Move matched files into `<path>/cut/`
@@ -61,6 +61,12 @@ Run it from the repo:
 cargo run -- cut ./my-photos --rule screenshots --dry-run
 ```
 
+Send matches into a custom folder:
+
+```bash
+cargo run -- cut ./my-photos --rule screenshots --destination ./review --dry-run
+```
+
 Or install the `caesim` command from this checkout:
 
 ```bash
@@ -68,11 +74,7 @@ cargo install --path .
 caesim cut ./my-photos --rule screenshots --dry-run
 ```
 
-Duplicate matching detects exact file-content duplicates and common exported-copy
-names such as `image (1).svg` when `image.svg` exists. With `--vision`, Caesim
-uses Google Cloud Vision signals for richer matching. `duplicates` asks for web
-matches, OCR, labels, and dominant colors; object rules such as `food` only ask
-for label detection.
+Duplicate matching detects exact file-content duplicates and common exported-copy names such as `image (1).svg` when `image.svg` exists. With `--vision`, Caesim uses Google Cloud Vision signals for richer matching. `duplicates` asks for web matches, OCR, labels, and dominant colors; object matching now goes through a separate `--contains` flag.
 
 ## Dev quickstart (Rust + optional Python Vision)
 
@@ -110,11 +112,10 @@ cargo run -- cut ./my-photos --rule duplicates --vision --dry-run
 Use Vision label detection for object-style filtering:
 
 ```bash
-cargo run -- cut ./my-photos --rule food --vision --dry-run
+cargo run -- cut ./my-photos --contains cars --vision --dry-run
 ```
 
-Backboard is planned as a report assistant layer: it should read `.caesim-report.json`
-after a run and explain or suggest follow-up commands, but not move files directly.
+Backboard is planned as a report assistant layer: it should read `.caesim-report.json` after a run and explain or suggest follow-up commands, but not move files directly.
 
 Note: the first `cargo build` / `cargo run` needs access to `crates.io` to download Rust dependencies.
 
