@@ -127,7 +127,20 @@ Use Vision label detection for object-style filtering:
 cargo run -- cut ./my-photos --contains cars --vision --dry-run
 ```
 
-Backboard is planned as a report assistant layer: it should read `.caesim-report.json` after a run and explain or suggest follow-up commands, but not move files directly.
+Backboard is available as an interactive assistant mode:
+
+```bash
+cargo run -- --ai-assist
+```
+
+It asks for a natural-language request, sends it to Backboard, and shows a suggested `caesim` command before execution.
+Set `BACKBOARD_API_KEY_CAESIM` in your environment before using it.
+
+You can customize the assistant's system prompt by setting `BACKBOARD_PROMPT` in your `.env`. Example:
+
+```bash
+# BACKBOARD_PROMPT="Translate user's request into a caesim command; return JSON with 'command' and 'explanation'"
+```
 
 Note: the first `cargo build` / `cargo run` needs access to `crates.io` to download Rust dependencies.
 

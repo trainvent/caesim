@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use walkdir::WalkDir;
+use tokio::runtime::Runtime;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -17,7 +18,11 @@ use walkdir::WalkDir;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+
+    /// Interactive AI assistant for generating caesim commands
+    #[arg(long = "ai-assist")]
+    ai_assist: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -97,6 +102,22 @@ struct ComplexityEstimate {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+struct BackboardRequest {
+    #[serde(rename = "type")]
+    interaction_type: String,
+    text: String,
+    context: Option<String>,
+    system_prompt: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BackboardResponse {
+    command: Option<String>,
+    explanation: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 struct VisionRequest {
     images: Vec<String>,
     features: Vec<String>,
@@ -121,9 +142,15 @@ struct VisionResponse {
 }
 
 fn main() -> Result<()> {
+    let _ = dotenvy::dotenv();
     let cli = Cli::parse();
+    if cli.ai_assist {
+        return run_assist();
+    }
+
     match cli.command {
-        Commands::Cut(args) => run_cut(args),
+        Some(Commands::Cut(args)) => run_cut(args),
+        None => Err(anyhow!("no command provided")),
     }
 }
 
@@ -347,6 +374,113 @@ fn run_cut(args: CutArgs) -> Result<()> {
         );
     }
     eprintln!("Wrote report: {}", report_path.display());
+    Ok(())
+}
+
+fn run_assist() -> Result<()> {
+    let runtime = Runtime::new().context("failed to create async runtime")?;
+    runtime.block_on(async {
+    eprintln!("\n=== Caesim AI Assistant ===");
+    eprintln!("Describe what you'd like to do with your image library.");
+    eprintln!("(Type 'help' for examples, or 'quit' to exit)\n");
+
+    let api_key = std::env::var("BACKBOARD_API_KEY_CAESIM")
+        .context("BACKBOARD_API_KEY_CAESIM environment variable not set")?;
+
+    loop {
+        eprint!(">>> ");
+        io::stderr().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        if input == "quit" || input == "exit" {
+            eprintln!("Goodbye!");
+            break;
+        }
+
+        if input == "help" {
+            eprintln!("Examples:");
+            eprintln!("  'cut landscape photos into a review folder'");
+            eprintln!("  'find all duplicate images and move them'");
+            eprintln!("  'scan for screenshots and put them in /tmp/screenshots'");
+            eprintln!("  'find food images using AI'");
+            eprintln!();
+            continue;
+        }
+
+        if input.is_empty() {
+            continue;
+        }
+
+        match call_backboard(&api_key, input).await {
+            Ok(response) => {
+                if let Some(cmd) = &response.command {
+                    if let Some(explanation) = &response.explanation {
+                        eprintln!("\n{}", explanation);
+                    }
+                    eprintln!("\nCommand: {}", cmd);
+                    eprint!("Execute? (y/n) ");
+                    io::stderr().flush()?;
+
+                    let mut confirm = String::new();
+                    io::stdin().read_line(&mut confirm)?;
+                    if confirm.trim().eq_ignore_ascii_case("y") {
+                        eprintln!("\nExecuting: {}", cmd);
+                        execute_command(cmd)?;
+                    } else {
+                        eprintln!("Skipped.");
+                    }
+                } else if let Some(err) = &response.error {
+                    eprintln!("Error: {}", err);
+                } else {
+                    eprintln!("No command generated.");
+                }
+            }
+            Err(e) => eprintln!("API error: {}", e),
+        }
+        eprintln!();
+    }
+
+    Ok(())
+    })
+}
+
+async fn call_backboard(api_key: &str, user_request: &str) -> Result<BackboardResponse> {
+    let client = reqwest::Client::new();
+    let system_prompt = std::env::var("BACKBOARD_PROMPT").ok().or_else(|| {
+        Some("You are a helpful assistant that converts a user's natural-language request about organizing or filtering an image library into a single, safe `caesim` CLI command. Only output JSON with fields `command` and `explanation`. Do not execute the command.".to_string())
+    });
+
+    let req = BackboardRequest {
+        interaction_type: "generate_command".to_string(),
+        text: user_request.to_string(),
+        context: Some("caesim image library trimming utility".to_string()),
+        system_prompt,
+    };
+
+    let res = client
+        .post("https://api.backboardpro.com/v1/interact")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&req)
+        .send()
+        .await
+        .context("Backboard API request failed")?;
+
+    res.json::<BackboardResponse>()
+        .await
+        .context("Failed to parse Backboard response")
+}
+
+fn execute_command(cmd: &str) -> Result<()> {
+    let mut shell_cmd = Command::new("sh");
+    shell_cmd.arg("-c").arg(cmd);
+    let status = shell_cmd.status().context("Failed to execute command")?;
+
+    if !status.success() {
+        return Err(anyhow!("Command exited with status: {}", status));
+    }
     Ok(())
 }
 
