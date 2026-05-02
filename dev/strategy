@@ -1,0 +1,183 @@
+Caesim phase-1 product strategy
+===============================
+
+Decision
+--------
+
+Use a hosted backend for all auth and usage data.
+
+Recommended MVP stack:
+- Frontend/CLI: the existing `caesim` Rust CLI
+- Auth: passwordless sign-in via a hosted auth provider
+- Primary database: managed Postgres
+- Optional cache/session layer: Redis only if needed later
+
+Where login data lives
+----------------------
+
+Do not store login secrets in the CLI.
+
+Store the product data in a backend-owned database:
+- user profile data: `users`
+- auth mapping: provider user id, email, plan, status
+- session metadata: issued tokens / refresh metadata if we manage sessions ourselves
+- usage and billing: request counters, token counts, image counts, Vision calls
+- assistant activity: prompts, command suggestions, execution status
+
+For phase 1, the simplest path is:
+- use hosted auth for sign-in
+- keep application records in managed Postgres
+- do not store Google Vision or Backboard keys on the client
+- proxy all AI/Vision requests through our backend
+
+Why this is the right choice
+----------------------------
+
+1. Users should never need our provider secrets.
+2. We can meter usage centrally.
+3. We can revoke access instantly.
+4. We can add quotas later without changing the client.
+5. It keeps the CLI thin and safe.
+
+Phase 1 scope
+-------------
+
+The first usable prototype should do only this:
+
+1. User signs in.
+2. CLI obtains a session token.
+3. `caesim --ai-assist` sends a request to our backend.
+4. Backend calls Backboard with our assistant profile.
+5. Backend returns a command suggestion.
+6. CLI confirms before executing.
+7. Backend writes usage records for every request.
+
+What we should store in Postgres
+--------------------------------
+
+Tables:
+
+- `users`
+	- id
+	- auth_provider
+	- auth_provider_user_id
+	- email
+	- plan
+	- created_at
+	- last_seen_at
+
+- `sessions`
+	- id
+	- user_id
+	- session_token_hash
+	- expires_at
+	- created_at
+	- revoked_at
+
+- `usage_events`
+	- id
+	- user_id
+	- event_type
+	- image_count
+	- request_tokens
+	- response_tokens
+	- estimated_cost
+	- created_at
+
+- `assistant_runs`
+	- id
+	- user_id
+	- request_text
+	- suggested_command
+	- accepted
+	- executed
+	- exit_code
+	- created_at
+
+If we later support BYOK:
+- store user provider keys encrypted at rest
+- never log raw secrets
+
+Usage control
+-------------
+
+Phase 1 should enforce:
+- per-user request limits
+- daily Vision call caps
+- per-user rate limiting
+- hard fail when quota is exhausted
+
+Prototype flow
+--------------
+
+1. `caesim login`
+	 - opens sign-in flow or asks for an email link
+	 - returns a local session token
+
+2. `caesim --ai-assist`
+	 - reads the session token
+	 - sends the natural-language request to our backend
+	 - receives a suggested command
+	 - asks for confirmation
+
+3. `caesim cut ...`
+	 - remains available for power users and debugging
+
+Implementation steps
+--------------------
+
+1. Create backend service skeleton.
+2. Add auth endpoints.
+3. Add `users` and `usage_events` tables.
+4. Add CLI login command.
+5. Route assistant requests through backend.
+6. Add quota checks and logging.
+7. Add a simple admin view later.
+
+Recommendation
+--------------
+
+For phase 1, use managed Postgres plus hosted auth.
+That keeps login data centralized, secure, and easy to meter.
+The CLI should only store a local session token, not provider credentials.
+
+Hosting recommendation
+----------------------
+
+Primary recommendation for phase 1:
+
+- **Backend API:** Supabase-only for now, or a small local backend during development
+- **Auth + Postgres:** Supabase
+
+Why this is the best MVP choice:
+- fastest path to a working product
+- minimal DevOps overhead
+- auth and database live in one place
+- no credit card required for the hosting path we use now
+- easy to add row-level security or admin tooling later
+- good enough for an invite-only first release
+
+Supabase project already created:
+- Project URL: `https://hsqbvdwhgevgbsozythh.supabase.co`
+
+If we need an API process later, we can add it separately. For now, the simplest path is to use Supabase for auth and Postgres and keep the backend prototype local during development.
+
+Alternative production-friendly stack:
+
+- **Backend API:** Fly.io
+- **Auth:** Clerk or Supabase Auth
+- **Database:** Neon Postgres
+
+Use this later if you expect the backend to grow quickly and want more separation between API, auth, and storage.
+
+Prototype storage note
+----------------------
+
+The backend prototype should use Postgres now so the schema and query style match the product path.
+For local development, run a Postgres container or local dev database.
+
+That means:
+- local prototype: Postgres on localhost or a dev container
+- production MVP: hosted auth + managed Postgres
+- the CLI never stores provider secrets
+
