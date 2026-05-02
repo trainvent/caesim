@@ -2,10 +2,10 @@
 
 Caesim is a small CLI-style concept for trimming large image libraries.
 
-Core idea:
+Default flow:
 
-1. You describe which images you do not want to the ai-assistant (for example: screenshots, duplicates, landscape, portrait, low-quality shots).
-2.
+1. You describe what you want to do in natural language to the AI assistant.
+2. Backboard turns that request into a valid `caesim` command.
 3. Caesim scans a folder and finds matches.
 4. Matches are moved into a separate `cut` folder for review, or to a custom folder with `--destination`.
 5. Nothing is hard-deleted by default.
@@ -20,7 +20,7 @@ The public site frames Caesim as:
 2. “Cut folder” workflow instead of immediate deletion
 3. A concept page, not a production SaaS product
 
-Example command concept:
+Example assistant-generated command concept:
 
 ```bash
 caesim cut ./my-photos --rule screenshots
@@ -91,7 +91,17 @@ Duplicate matching detects exact file-content duplicates and common exported-cop
 
 ## Dev quickstart (Rust + optional Python Vision)
 
-### Local-only run (no AI)
+### AI-first run
+
+Start the assistant and describe the cleanup you want:
+
+```bash
+cargo run -- --ai-assist
+```
+
+The assistant creates the `caesim` command for you, then asks before executing it.
+
+### Local-only run (manual command)
 
 ```bash
 cargo run -- cut ./my-photos --rule screenshots --dry-run
@@ -128,7 +138,7 @@ Use Vision label detection for object-style filtering:
 cargo run -- cut ./my-photos --contains cars --vision --dry-run
 ```
 
-Backboard is available as an interactive assistant mode:
+Backboard is the default command-creation layer:
 
 ```bash
 cargo run -- --ai-assist
@@ -150,8 +160,8 @@ Note: the first `cargo build` / `cargo run` needs access to `crates.io` to downl
 Based on `https://caesim.com/` content (accessed April 23, 2026).
 
 ## Tools in use
-- Backboard.io for AI Assistant
-- google vision for image recognition
+- Backboard.io for AI-assisted command creation
+- Google Vision for image recognition
 
 ## Credits
 - Codex and Github CoPilot were used

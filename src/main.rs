@@ -745,9 +745,52 @@ fn vision_features_for_rule(rule: &str) -> Vec<String> {
 }
 
 fn image_matches_orientation(path: &Path, rule: &str) -> Result<bool> {
-    let (width, height) = image::image_dimensions(path)
+    let (width, height) = read_image_dimensions(path)
         .with_context(|| format!("failed to read image dimensions for {}", path.display()))?;
     Ok(orientation_matches_dimensions(width, height, rule))
+}
+
+fn read_image_dimensions(path: &Path) -> Result<(u32, u32)> {
+    if let Ok(dimensions) = image::image_dimensions(path) {
+        return Ok(dimensions);
+    }
+
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(
+            r#"
+from PIL import Image
+import sys
+path = sys.argv[1]
+with Image.open(path) as img:
+    print(f'{img.width} {img.height}')
+"#,
+        )
+        .arg(path)
+        .output()
+        .context("python3 fallback failed to start")?;
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "python3 fallback failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout).context("python3 fallback returned invalid utf-8")?;
+    let mut parts = stdout.split_whitespace();
+    let width: u32 = parts
+        .next()
+        .ok_or_else(|| anyhow!("python3 fallback missing width"))?
+        .parse()
+        .context("python3 fallback width parse failed")?;
+    let height: u32 = parts
+        .next()
+        .ok_or_else(|| anyhow!("python3 fallback missing height"))?
+        .parse()
+        .context("python3 fallback height parse failed")?;
+
+    Ok((width, height))
 }
 
 fn orientation_matches_dimensions(width: u32, height: u32, rule: &str) -> bool {
