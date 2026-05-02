@@ -13,6 +13,7 @@ struct AssistRequest {
     thread_id: Option<String>,
     system_prompt: Option<String>,
     json_output: bool,
+    memory: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -37,6 +38,7 @@ pub async fn interact(api_key: &str, user_text: &str, thread_id: Option<String>)
         thread_id: thread_id.or(cfg.thread_id.clone()),
         system_prompt: cfg.system_prompt.clone(),
         json_output: true,
+        memory: "Auto".to_string(),
     };
 
     let client = Client::new();
@@ -67,19 +69,51 @@ pub async fn interact(api_key: &str, user_text: &str, thread_id: Option<String>)
     let thread_id = parsed.get("thread_id").and_then(|v| v.as_str()).map(|s| s.to_string());
     let status = parsed.get("status").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-    let (command, explanation, error) = if let Some(content) = content.as_deref() {
-        if let Ok(json) = serde_json::from_str::<Value>(content) {
-            (
-                json.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                json.get("explanation").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                json.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            )
-        } else {
-            (None, None, None)
-        }
-    } else {
-        (None, None, None)
-    };
+    let (command, explanation, error) = extract_command_fields(content.as_deref());
 
     Ok(AssistResponse { thread_id, assistant_id, content, status, command, explanation, error, raw: parsed })
+}
+
+fn extract_command_fields(content: Option<&str>) -> (Option<String>, Option<String>, Option<String>) {
+    let Some(content) = content else {
+        return (None, None, None);
+    };
+
+    if let Ok(json) = serde_json::from_str::<Value>(content) {
+        return (
+            json.get("command").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            json.get("explanation").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            json.get("error").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        );
+    }
+
+    let mut explanation = None;
+    let mut command = None;
+
+    for line in content.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("command:") {
+            let cmd = rest.trim().trim_matches('`').trim_matches('"');
+            if !cmd.is_empty() {
+                command = Some(cmd.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("explanation:") {
+            let text = rest.trim().trim_matches('`').trim_matches('"');
+            if !text.is_empty() {
+                explanation = Some(text.to_string());
+            }
+        } else if line.starts_with("caesim ") || line.starts_with("cargo run -- cut ") {
+            command = Some(line.to_string());
+        }
+    }
+
+    if command.is_none() {
+        if let Some(start) = content.find("caesim ") {
+            let tail = &content[start..];
+            if let Some(line) = tail.lines().next() {
+                command = Some(line.trim().trim_matches('`').trim_matches('"').to_string());
+            }
+        }
+    }
+
+    (command, explanation, None)
 }

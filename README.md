@@ -4,10 +4,11 @@ Caesim is a small CLI-style concept for trimming large image libraries.
 
 Core idea:
 
-1. You describe which images you do not want (for example: screenshots, duplicates, landscape, portrait, low-quality shots).
-2. Caesim scans a folder and finds matches.
-3. Matches are moved into a separate `cut` folder for review, or to a custom folder with `--destination`.
-4. Nothing is hard-deleted by default.
+1. You describe which images you do not want to the ai-assistant (for example: screenshots, duplicates, landscape, portrait, low-quality shots).
+2.
+3. Caesim scans a folder and finds matches.
+4. Matches are moved into a separate `cut` folder for review, or to a custom folder with `--destination`.
+5. Nothing is hard-deleted by default.
 
 This keeps cleanup fast while preserving a safety review step.
 
@@ -147,3 +148,11 @@ Note: the first `cargo build` / `cargo run` needs access to `crates.io` to downl
 ## Source
 
 Based on `https://caesim.com/` content (accessed April 23, 2026).
+
+## Tools in use
+- Backboard.io for AI Assistant
+- google vision for image recognition
+
+## Credits
+- Codex and Github CoPilot were used
+

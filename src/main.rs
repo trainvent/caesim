@@ -373,6 +373,7 @@ fn run_assist() -> Result<()> {
 
     let api_key = std::env::var("BACKBOARD_API_KEY_CAESIM")
         .context("BACKBOARD_API_KEY_CAESIM environment variable not set")?;
+    let mut thread_id: Option<String> = std::env::var("BACKBOARD_THREAD_ID").ok();
 
     loop {
         eprint!(">>> ");
@@ -401,10 +402,11 @@ fn run_assist() -> Result<()> {
             continue;
         }
 
-        match ai_assist::interact(&api_key, input, None).await {
+        match ai_assist::interact(&api_key, input, thread_id.clone()).await {
             Ok(response) => {
-                if let Some(thread_id) = response.thread_id.as_ref() {
-                    eprintln!("Thread: {}", thread_id);
+                if let Some(new_thread_id) = response.thread_id.as_ref() {
+                    eprintln!("Thread: {}", new_thread_id);
+                    thread_id = Some(new_thread_id.clone());
                 }
                 if let Some(assistant_id) = response.assistant_id.as_ref() {
                     eprintln!("Assistant: {}", assistant_id);
@@ -428,6 +430,9 @@ fn run_assist() -> Result<()> {
                 } else if let Some(err) = &response.error {
                     eprintln!("Error: {}", err);
                 } else {
+                    if let Some(content) = &response.content {
+                        eprintln!("Assistant reply: {}", content);
+                    }
                     eprintln!("No command generated.");
                 }
             }
