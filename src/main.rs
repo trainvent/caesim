@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+mod ai_assist;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -101,21 +102,7 @@ struct ComplexityEstimate {
     notes: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct BackboardRequest {
-    #[serde(rename = "type")]
-    interaction_type: String,
-    text: String,
-    context: Option<String>,
-    system_prompt: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct BackboardResponse {
-    command: Option<String>,
-    explanation: Option<String>,
-    error: Option<String>,
-}
+// Backboard request/response types moved to `src/ai_assist` module.
 
 #[derive(Serialize, Deserialize, Debug)]
 struct VisionRequest {
@@ -414,8 +401,14 @@ fn run_assist() -> Result<()> {
             continue;
         }
 
-        match call_backboard(&api_key, input).await {
+        match ai_assist::interact(&api_key, input, None).await {
             Ok(response) => {
+                if let Some(thread_id) = response.thread_id.as_ref() {
+                    eprintln!("Thread: {}", thread_id);
+                }
+                if let Some(assistant_id) = response.assistant_id.as_ref() {
+                    eprintln!("Assistant: {}", assistant_id);
+                }
                 if let Some(cmd) = &response.command {
                     if let Some(explanation) = &response.explanation {
                         eprintln!("\n{}", explanation);
@@ -438,7 +431,7 @@ fn run_assist() -> Result<()> {
                     eprintln!("No command generated.");
                 }
             }
-            Err(e) => eprintln!("API error: {}", e),
+            Err(e) => eprintln!("Assistant API error: {:#}", e),
         }
         eprintln!();
     }
@@ -447,31 +440,7 @@ fn run_assist() -> Result<()> {
     })
 }
 
-async fn call_backboard(api_key: &str, user_request: &str) -> Result<BackboardResponse> {
-    let client = reqwest::Client::new();
-    let system_prompt = std::env::var("BACKBOARD_PROMPT").ok().or_else(|| {
-        Some("You are a helpful assistant that converts a user's natural-language request about organizing or filtering an image library into a single, safe `caesim` CLI command. Only output JSON with fields `command` and `explanation`. Do not execute the command.".to_string())
-    });
-
-    let req = BackboardRequest {
-        interaction_type: "generate_command".to_string(),
-        text: user_request.to_string(),
-        context: Some("caesim image library trimming utility".to_string()),
-        system_prompt,
-    };
-
-    let res = client
-        .post("https://api.backboardpro.com/v1/interact")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req)
-        .send()
-        .await
-        .context("Backboard API request failed")?;
-
-    res.json::<BackboardResponse>()
-        .await
-        .context("Failed to parse Backboard response")
-}
+// `call_backboard` removed; use `ai_assist::interact()` in its place.
 
 fn execute_command(cmd: &str) -> Result<()> {
     let mut shell_cmd = Command::new("sh");
