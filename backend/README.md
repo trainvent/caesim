@@ -7,6 +7,7 @@ This is the first usable backend scaffold for Caesim.
 - stores users in Postgres for development and production
 - issues a login verification code
 - creates session tokens
+- serves `caesim login` and `caesim whoami`
 - records assistant usage events
 - returns a simple command suggestion for image-library cleanup requests
 

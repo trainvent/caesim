@@ -1,6 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 mod ai_assist;
+mod auth;
 use clap::{Parser, Subcommand};
+use std::env;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -30,6 +32,13 @@ struct Cli {
 enum Commands {
     /// Scan a folder and move matched images into a cut folder
     Cut(CutArgs),
+    /// Configure and learn about Google Vision setup
+    Vision(VisionArgs),
+    /// Sign in or create a local account session
+    #[command(alias = "register")]
+    Login(LoginArgs),
+    /// Show the active local account session
+    Whoami,
 }
 
 #[derive(Parser, Debug)]
@@ -69,6 +78,24 @@ struct CutArgs {
     /// Enable optional Python + Google Vision backend (post-run/advanced rules)
     #[arg(long)]
     vision: bool,
+}
+
+#[derive(Parser, Debug)]
+struct VisionArgs {
+    /// Optional: path to custom service account JSON file to use
+    #[arg(long = "service-account-json")]
+    service_account_json: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+struct LoginArgs {
+    /// Email address to use for sign-in
+    #[arg(long)]
+    email: Option<String>,
+
+    /// Verification code returned by the backend
+    #[arg(long = "verification-code")]
+    verification_code: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -137,8 +164,152 @@ fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Cut(args)) => run_cut(args),
+        Some(Commands::Vision(args)) => run_vision(args),
+        Some(Commands::Login(args)) => run_login(args),
+        Some(Commands::Whoami) => run_whoami(),
         None => Err(anyhow!("no command provided")),
     }
+}
+
+fn run_login(args: LoginArgs) -> Result<()> {
+    let runtime = Runtime::new().context("failed to create async runtime")?;
+    runtime.block_on(async move {
+        let backend_base = auth::default_backend_base_url();
+        eprintln!("\n=== Caesim Login ===\n");
+
+        let email = match args.email {
+            Some(email) => email,
+            None => prompt_line("Email address: ")?,
+        };
+
+        let code = if let Some(code) = args.verification_code {
+            code
+        } else {
+            let login = auth::start_login(&backend_base, &email).await?;
+            eprintln!("Verification code sent to {}.", login.email);
+            eprintln!("User ID: {}", login.user_id);
+            eprintln!("For the prototype, use this code:");
+            eprintln!("  {}", login.verification_code);
+            eprintln!("This code expires at {}.", login.expires_at);
+            prompt_line("Verification code: ")?
+        };
+
+        let session = auth::verify_login(&backend_base, &email, &code).await?;
+        auth::save_session(&auth::StoredSession {
+            backend_base_url: backend_base,
+            user_id: session.user_id.clone(),
+            email: session.email.clone(),
+            session_token: session.session_token.clone(),
+            expires_at: session.expires_at,
+            saved_at: current_unix_ts(),
+        })?;
+
+        eprintln!("Signed in as {} ({})", session.email, session.user_id);
+        eprintln!("Session saved locally.");
+        Ok(())
+    })
+}
+
+fn run_whoami() -> Result<()> {
+    let runtime = Runtime::new().context("failed to create async runtime")?;
+    runtime.block_on(async move {
+        let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let backend_base = std::env::var("CAESIM_BACKEND_URL")
+            .ok()
+            .unwrap_or_else(|| session.backend_base_url.clone());
+        let me = auth::fetch_me(&backend_base, &session.session_token).await;
+
+        match me {
+            Ok(profile) => {
+                eprintln!("Signed in as {}", profile.email);
+                eprintln!("User ID: {}", profile.user_id);
+                eprintln!("Account status: {}", profile.account_status);
+                eprintln!("Credit balance: {}", profile.credit_balance);
+                eprintln!("Session expires at: {}", profile.expires_at);
+                Ok(())
+            }
+            Err(err) => {
+                let message = format!("{}", err);
+                if message.contains("401") || message.contains("unauthorized") || message.contains("session expired") {
+                    let _ = auth::clear_session();
+                }
+                Err(err)
+            }
+        }
+    })
+}
+
+fn prompt_line(prompt: &str) -> Result<String> {
+    eprint!("{}", prompt);
+    io::stderr().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_string();
+    if input.is_empty() {
+        return Err(anyhow!("no input provided"));
+    }
+    Ok(input)
+}
+
+fn current_unix_ts() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn run_vision(args: VisionArgs) -> Result<()> {
+    eprintln!("\n=== Google Cloud Vision Configuration ===\n");
+
+    // Check if GOOGLE_APPLICATION_CREDENTIALS is already set
+    if let Ok(creds_path) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
+        eprintln!("✓ GOOGLE_APPLICATION_CREDENTIALS is set to:");
+        eprintln!("  {}", creds_path);
+        if PathBuf::from(&creds_path).exists() {
+            eprintln!("  (file exists)");
+        } else {
+            eprintln!("  (warning: file not found)");
+        }
+        eprintln!();
+    }
+
+    // Check for default credentials location
+    if let Ok(home) = env::var("HOME") {
+        let default_creds = PathBuf::from(home).join(".config/gcloud/application_default_credentials.json");
+        if default_creds.exists() {
+            eprintln!("✓ Default Application Credentials found at:");
+            eprintln!("  {}", default_creds.display());
+            eprintln!();
+        }
+    }
+
+    // If custom path provided, set GOOGLE_APPLICATION_CREDENTIALS to it
+    if let Some(custom_json) = args.service_account_json {
+        if !custom_json.exists() {
+            return Err(anyhow!("service account JSON does not exist: {}", custom_json.display()));
+        }
+        eprintln!("To use custom credentials, set the environment variable:");
+        eprintln!("  export GOOGLE_APPLICATION_CREDENTIALS=\"{}\"", custom_json.display());
+        eprintln!();
+        eprintln!("Then run caesim commands with --vision flag.");
+        return Ok(());
+    }
+
+    // Guide through gcloud auth
+    eprintln!("To set up Google Vision credentials, run:");
+    eprintln!("  gcloud auth application-default login");
+    eprintln!();
+    eprintln!("This will:");
+    eprintln!("  1. Open a browser to authenticate with your Google account");
+    eprintln!("  2. Save credentials to ~/.config/gcloud/application_default_credentials.json");
+    eprintln!("  3. Allow caesim to access Google Cloud Vision API");
+    eprintln!();
+    eprintln!("After setup, you can use caesim with --vision flag:");
+    eprintln!("  caesim cut <path> --rule duplicates --vision");
+    eprintln!();
+
+    Ok(())
 }
 
 fn run_cut(args: CutArgs) -> Result<()> {
@@ -1063,4 +1234,3 @@ mod tests {
         }
     }
 }
-//!TODO add the "caesim config vision" way

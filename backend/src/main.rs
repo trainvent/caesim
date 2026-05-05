@@ -1,22 +1,21 @@
 use anyhow::Context;
 use axum::{
     extract::State,
-    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
+    http::HeaderMap,
+    http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use hex::encode as hex_encode;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use sqlx::{postgres::{PgConnectOptions, PgPoolOptions}, FromRow, PgPool};
-use std::{env, net::SocketAddr, process::Command, time::{SystemTime, UNIX_EPOCH}};
-use tracing_subscriber::EnvFilter;
+use std::{env, net::SocketAddr, time::{SystemTime, UNIX_EPOCH}};
 use uuid::Uuid;
 
 #[derive(Clone)]
 struct AppState {
-    pool: PgPool,
+    supabase_url: String,
+    supabase_key: String,
+    http_client: reqwest::Client,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,18 +28,31 @@ struct LoginRequest {
     email: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct SupabaseUser {
+    id: String,
+    email: Option<String>,
+    user_metadata: serde_json::Value,
+}
+
 #[derive(Debug, Serialize)]
 struct LoginResponse {
     user_id: String,
     email: String,
-    verification_code: String,
-    expires_at: i64,
+    message: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct VerifyRequest {
+    access_token: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct UserProfile {
+    id: String,
     email: String,
-    verification_code: String,
+    account_status: String,
+    credit_balance: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +60,15 @@ struct VerifyResponse {
     user_id: String,
     email: String,
     session_token: String,
+    expires_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+struct MeResponse {
+    user_id: String,
+    email: String,
+    account_status: String,
+    credit_balance: i64,
     expires_at: i64,
 }
 
@@ -66,21 +87,6 @@ struct AssistantResponse {
     user_id: Option<String>,
 }
 
-#[derive(Debug, FromRow)]
-struct UserRow {
-    id: String,
-    email: String,
-    pending_code: Option<String>,
-    code_expires_at: Option<i64>,
-}
-
-#[derive(Debug, FromRow)]
-struct SessionRow {
-    user_id: String,
-    expires_at: i64,
-    revoked_at: Option<i64>,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::from_path(concat!(env!("CARGO_MANIFEST_DIR"), "/.env"));
@@ -89,23 +95,22 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .init();
 
-    let database_url = resolve_database_url()?;
-    let connect_options = database_url
-        .parse::<PgConnectOptions>()?
-        .statement_cache_capacity(0);
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect_with(connect_options)
-        .await
-        .with_context(|| format!("failed to connect to database at {database_url}"))?;
+    let supabase_url = env::var("SUPABASE_URL")
+        .context("SUPABASE_URL environment variable not set")?;
+    let supabase_key = env::var("SUPABASE_KEY")
+        .context("SUPABASE_KEY environment variable not set")?;
 
-    init_db(&pool).await?;
+    let state = AppState {
+        supabase_url,
+        supabase_key,
+        http_client: reqwest::Client::new(),
+    };
 
-    let state = AppState { pool };
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/auth/login", post(login))
         .route("/v1/auth/verify", post(verify))
+        .route("/v1/auth/me", get(me))
         .route("/v1/assistant/request", post(assistant_request))
         .with_state(state);
 
@@ -127,38 +132,35 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
     let email = normalize_email(&req.email)?;
-    let now = unix_ts();
-    let expires_at = now + 10 * 60;
-    let verification_code = Uuid::new_v4().simple().to_string()[..8].to_ascii_uppercase();
-    let user_id = Uuid::new_v4().to_string();
 
-    sqlx::query(
-        r#"
-        INSERT INTO users (id, email, auth_provider, plan, created_at, last_seen_at, pending_code, code_expires_at)
-        VALUES ($1, $2, 'email', 'beta', $3, $3, $4, $5)
-        ON CONFLICT(email) DO UPDATE SET
-            last_seen_at = excluded.last_seen_at,
-            pending_code = excluded.pending_code,
-            code_expires_at = excluded.code_expires_at
-        "#,
-    )
-    .persistent(false)
-    .bind(&user_id)
-    .bind(&email)
-    .bind(now)
-    .bind(&verification_code)
-    .bind(expires_at)
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::db)?;
+    // Send magic link via Supabase Auth
+    let url = format!("{}/auth/v1/otp", state.supabase_url);
+    let body = serde_json::json!({
+        "email": email,
+        "create_user": true
+    });
 
-    let user = fetch_user_by_email(&state.pool, &email).await?.ok_or_else(|| ApiError::internal("user was not created"))?;
+    let response = state
+        .http_client
+        .post(&url)
+        .header("apikey", &state.supabase_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to contact Supabase: {e}")))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(ApiError::internal(format!("Supabase error: {error_text}")));
+    }
+
+    // Ensure user profile exists in public schema
+    ensure_user_profile(&state, &email).await?;
 
     Ok(Json(LoginResponse {
-        user_id: user.id,
-        email: user.email,
-        verification_code,
-        expires_at,
+        user_id: "pending".to_string(),
+        email: email.clone(),
+        message: format!("Magic link sent to {email}. Check your email to complete login."),
     }))
 }
 
@@ -166,61 +168,79 @@ async fn verify(
     State(state): State<AppState>,
     Json(req): Json<VerifyRequest>,
 ) -> Result<Json<VerifyResponse>, ApiError> {
-    let email = normalize_email(&req.email)?;
-    let now = unix_ts();
-    let user = fetch_user_by_email(&state.pool, &email)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("unknown email"))?;
+    // Get user info from Supabase using the access token
+    let url = format!("{}/auth/v1/user", state.supabase_url);
+    let response = state
+        .http_client
+        .get(&url)
+        .header("apikey", &state.supabase_key)
+        .header("Authorization", format!("Bearer {}", req.access_token))
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to get user info: {e}")))?;
 
-    let pending_code = user
-        .pending_code
-        .ok_or_else(|| ApiError::unauthorized("no pending verification code"))?;
-    let code_expires_at = user
-        .code_expires_at
-        .ok_or_else(|| ApiError::unauthorized("verification expired"))?;
-
-    if code_expires_at < now {
-        return Err(ApiError::unauthorized("verification code expired"));
+    if !response.status().is_success() {
+        return Err(ApiError::unauthorized("invalid access token"));
     }
 
-    if pending_code != req.verification_code.trim().to_ascii_uppercase() {
-        return Err(ApiError::unauthorized("invalid verification code"));
-    }
+    let user: SupabaseUser = response
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to parse user info: {e}")))?;
+
+    let email = user.email.clone().ok_or_else(|| ApiError::internal("user has no email"))?;
+
+    // Ensure user profile exists
+    ensure_user_profile(&state, &email).await?;
 
     let session_token = Uuid::new_v4().to_string();
-    let token_hash = hash_token(&session_token);
-    let expires_at = now + 30 * 24 * 60 * 60;
-    let session_id = Uuid::new_v4().to_string();
-
-    sqlx::query(
-        r#"
-        INSERT INTO sessions (id, user_id, session_token_hash, expires_at, created_at, revoked_at)
-        VALUES ($1, $2, $3, $4, $5, NULL)
-        "#,
-    )
-    .persistent(false)
-    .bind(&session_id)
-    .bind(&user.id)
-    .bind(&token_hash)
-    .bind(expires_at)
-    .bind(now)
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::db)?;
-
-    sqlx::query("UPDATE users SET pending_code = NULL, code_expires_at = NULL, last_seen_at = $2 WHERE id = $1")
-        .persistent(false)
-        .bind(&user.id)
-        .bind(now)
-        .execute(&state.pool)
-        .await
-        .map_err(ApiError::db)?;
+    let expires_at = unix_ts() + 30 * 24 * 60 * 60;
 
     Ok(Json(VerifyResponse {
         user_id: user.id,
-        email: user.email,
+        email,
         session_token,
         expires_at,
+    }))
+}
+
+async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<MeResponse>, ApiError> {
+    let token = bearer_token(&headers)?;
+
+    // Validate token with Supabase
+    let url = format!("{}/auth/v1/user", state.supabase_url);
+    let response = state
+        .http_client
+        .get(&url)
+        .header("apikey", &state.supabase_key)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to get user info: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(ApiError::unauthorized("invalid token"));
+    }
+
+    let user: SupabaseUser = response
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to parse user: {e}")))?;
+
+    let email = user.email.ok_or_else(|| ApiError::internal("user has no email"))?;
+
+    // Fetch user profile from Supabase
+    let profile = fetch_user_profile(&state, &user.id).await?;
+
+    Ok(Json(MeResponse {
+        user_id: user.id,
+        email,
+        account_status: profile.account_status,
+        credit_balance: profile.credit_balance,
+        expires_at: unix_ts() + 30 * 24 * 60 * 60,
     }))
 }
 
@@ -230,149 +250,87 @@ async fn assistant_request(
     Json(req): Json<AssistantRequest>,
 ) -> Result<Json<AssistantResponse>, ApiError> {
     let token = bearer_token(&headers)?;
-    let session = find_session_by_token(&state.pool, &token)
-        .await?
-        .ok_or_else(|| ApiError::unauthorized("invalid session token"))?;
 
-    if session.revoked_at.is_some() || session.expires_at < unix_ts() {
-        return Err(ApiError::unauthorized("session expired"));
+    // Validate token with Supabase
+    let url = format!("{}/auth/v1/user", state.supabase_url);
+    let response = state
+        .http_client
+        .get(&url)
+        .header("apikey", &state.supabase_key)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to get user info: {e}")))?;
+
+    if !response.status().is_success() {
+        return Err(ApiError::unauthorized("invalid token"));
     }
 
-    let user_id = session.user_id;
+    let user: SupabaseUser = response
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to parse user: {e}")))?;
+
     let (command, explanation) = suggest_command(&req.prompt, req.path.as_deref());
-
-    let now = unix_ts();
-    let assistant_run_id = Uuid::new_v4().to_string();
-    let usage_event_id = Uuid::new_v4().to_string();
-
-    sqlx::query(
-        r#"
-        INSERT INTO assistant_runs (id, user_id, request_text, suggested_command, accepted, executed, exit_code, created_at)
-        VALUES ($1, $2, $3, $4, FALSE, FALSE, NULL, $5)
-        "#,
-    )
-    .persistent(false)
-    .bind(&assistant_run_id)
-    .bind(&user_id)
-    .bind(&req.prompt)
-    .bind(&command)
-    .bind(now)
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::db)?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO usage_events (id, user_id, event_type, image_count, request_tokens, response_tokens, estimated_cost, created_at)
-        VALUES ($1, $2, 'assistant_request', 0, 0, 0, 0.0, $3)
-        "#,
-    )
-    .persistent(false)
-    .bind(&usage_event_id)
-    .bind(&user_id)
-    .bind(now)
-    .execute(&state.pool)
-    .await
-    .map_err(ApiError::db)?;
 
     Ok(Json(AssistantResponse {
         command,
         explanation,
-        user_id: Some(user_id),
+        user_id: Some(user.id),
     }))
 }
 
-async fn init_db(pool: &PgPool) -> anyhow::Result<()> {
-    for statement in [
-        r#"
-        CREATE TABLE IF NOT EXISTS users (
-            id TEXT PRIMARY KEY,
-            email TEXT NOT NULL UNIQUE,
-            auth_provider TEXT NOT NULL,
-            plan TEXT NOT NULL,
-            created_at BIGINT NOT NULL,
-            last_seen_at BIGINT NOT NULL,
-            pending_code TEXT,
-            code_expires_at BIGINT
-        )
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS sessions (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            session_token_hash TEXT NOT NULL UNIQUE,
-            expires_at BIGINT NOT NULL,
-            created_at BIGINT NOT NULL,
-            revoked_at BIGINT,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS usage_events (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            image_count INTEGER NOT NULL DEFAULT 0,
-            request_tokens INTEGER NOT NULL DEFAULT 0,
-            response_tokens INTEGER NOT NULL DEFAULT 0,
-            estimated_cost DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            created_at BIGINT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-        "#,
-        r#"
-        CREATE TABLE IF NOT EXISTS assistant_runs (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL,
-            request_text TEXT NOT NULL,
-            suggested_command TEXT,
-            accepted BOOLEAN NOT NULL,
-            executed BOOLEAN NOT NULL,
-            exit_code INTEGER,
-            created_at BIGINT NOT NULL,
-            FOREIGN KEY(user_id) REFERENCES users(id)
-        )
-        "#,
-    ] {
-        sqlx::query(statement).persistent(false).execute(pool).await?;
-    }
+async fn ensure_user_profile(state: &AppState, email: &str) -> Result<(), ApiError> {
+    let url = format!("{}/rest/v1/user_profiles", state.supabase_url);
+    let body = serde_json::json!({
+        "email": email,
+        "account_status": "active",
+        "credit_balance": 0
+    });
+
+    let _response = state
+        .http_client
+        .post(&url)
+        .header("apikey", &state.supabase_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .ok();
 
     Ok(())
 }
 
-async fn fetch_user_by_email(pool: &PgPool, email: &str) -> Result<Option<UserRow>, ApiError> {
-    let user = sqlx::query_as::<_, UserRow>(
-        r#"
-        SELECT id, email, pending_code, code_expires_at
-        FROM users
-        WHERE email = $1
-        "#,
-    )
-    .persistent(false)
-    .bind(email)
-    .fetch_optional(pool)
-    .await
-    .map_err(ApiError::db)?;
+async fn fetch_user_profile(state: &AppState, user_id: &str) -> Result<UserProfile, ApiError> {
+    let url = format!("{}/rest/v1/user_profiles?id=eq.{}", state.supabase_url, user_id);
+    let response = state
+        .http_client
+        .get(&url)
+        .header("apikey", &state.supabase_key)
+        .send()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to fetch profile: {e}")))?;
 
-    Ok(user)
-}
+    if !response.status().is_success() {
+        return Ok(UserProfile {
+            id: user_id.to_string(),
+            email: "unknown".to_string(),
+            account_status: "active".to_string(),
+            credit_balance: 0,
+        });
+    }
 
-async fn find_session_by_token(pool: &PgPool, token: &str) -> Result<Option<SessionRow>, ApiError> {
-    let token_hash = hash_token(token);
-    let session = sqlx::query_as::<_, SessionRow>(
-        r#"
-        SELECT user_id, expires_at, revoked_at
-        FROM sessions
-        WHERE session_token_hash = $1
-        "#,
-    )
-    .persistent(false)
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await
-    .map_err(ApiError::db)?;
+    let profiles: Vec<UserProfile> = response
+        .json()
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to parse profile: {e}")))?;
 
-    Ok(session)
+    Ok(profiles.into_iter().next().unwrap_or(UserProfile {
+        id: user_id.to_string(),
+        email: "unknown".to_string(),
+        account_status: "active".to_string(),
+        credit_balance: 0,
+    }))
 }
 
 fn normalize_email(email: &str) -> Result<String, ApiError> {
@@ -385,7 +343,7 @@ fn normalize_email(email: &str) -> Result<String, ApiError> {
 
 fn bearer_token(headers: &HeaderMap) -> Result<String, ApiError> {
     let header = headers
-        .get(AUTHORIZATION)
+        .get("authorization")
         .ok_or_else(|| ApiError::unauthorized("missing authorization header"))?;
     let value = header
         .to_str()
@@ -441,52 +399,11 @@ fn suggest_command(prompt: &str, path: Option<&str>) -> (Option<String>, String)
     )
 }
 
-fn hash_token(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    hex_encode(digest)
-}
-
 fn unix_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-fn resolve_database_url() -> anyhow::Result<String> {
-    if let Ok(url) = env::var("DATABASE_URL") {
-        return Ok(url);
-    }
-
-    if let Some(url) = read_supabase_url_from_keychain("Ceasim_Supabase")? {
-        return Ok(url);
-    }
-
-    Ok("postgres://postgres:postgres@localhost:5432/caesim".to_string())
-}
-
-fn read_supabase_url_from_keychain(entry_name: &str) -> anyhow::Result<Option<String>> {
-    let lookup_args = [
-        ["lookup", "label", entry_name],
-        ["lookup", "service", entry_name],
-        ["lookup", "name", entry_name],
-        ["lookup", "username", entry_name],
-    ];
-
-    for args in lookup_args {
-        let output = Command::new("secret-tool").args(args).output();
-        let Ok(output) = output else { continue };
-        if !output.status.success() {
-            continue;
-        }
-        let value = String::from_utf8(output.stdout).context("keychain secret is not valid utf-8")?;
-        let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(Some(trimmed.to_string()));
-        }
-    }
-
-    Ok(None)
 }
 
 #[derive(Debug)]
@@ -511,10 +428,6 @@ impl ApiError {
 
     fn internal(message: impl Into<String>) -> Self {
         Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: message.into() }
-    }
-
-    fn db(err: sqlx::Error) -> Self {
-        Self::internal(format!("database error: {err}"))
     }
 }
 

@@ -5,6 +5,7 @@ Decision
 --------
 
 Use a hosted backend for all auth and usage data.
+For phase 1, prefer a prepaid credit model over subscription plans.
 
 Recommended MVP stack:
 - Frontend/CLI: the existing `caesim` Rust CLI
@@ -19,7 +20,9 @@ Do not store login secrets in the CLI.
 
 Store the product data in a backend-owned database:
 - user profile data: `users`
-- auth mapping: provider user id, email, plan, status
+- auth mapping: provider user id, email, account status
+- credit balance: prepaid credits remaining
+- credit ledger: top-ups, deductions, expirations
 - session metadata: issued tokens / refresh metadata if we manage sessions ourselves
 - usage and billing: request counters, token counts, image counts, Vision calls
 - assistant activity: prompts, command suggestions, execution status
@@ -29,6 +32,7 @@ For phase 1, the simplest path is:
 - keep application records in managed Postgres
 - do not store Google Vision or Backboard keys on the client
 - proxy all AI/Vision requests through our backend
+- charge against prepaid credits instead of maintaining plan tiers
 
 Why this is the right choice
 ----------------------------
@@ -38,6 +42,7 @@ Why this is the right choice
 3. We can revoke access instantly.
 4. We can add quotas later without changing the client.
 5. It keeps the CLI thin and safe.
+6. Prepaid credits are easier to implement than plan enforcement and proration.
 
 Phase 1 scope
 -------------
@@ -52,6 +57,29 @@ The first usable prototype should do only this:
 6. CLI confirms before executing.
 7. Backend writes usage records for every request.
 
+User registration and profile flow
+----------------------------------
+
+Keep signup simple and explicit:
+
+1. User enters email or signs in with the hosted auth provider.
+2. Backend creates or loads the `users` record.
+3. Backend initializes account status and credit balance.
+4. CLI stores only a local session token.
+5. On later runs, the CLI reuses the stored session and refreshes profile state from the backend.
+
+User profile data should stay minimal in phase 1:
+
+- email
+- display name if the auth provider gives one
+- account status
+- credit balance
+- last seen time
+- usage summary
+
+Do not make profile creation a separate manual step unless needed later.
+The first authenticated session should create the profile automatically.
+
 What we should store in Postgres
 --------------------------------
 
@@ -62,7 +90,9 @@ Tables:
 	- auth_provider
 	- auth_provider_user_id
 	- email
-	- plan
+	- display_name
+	- credit_balance
+	- account_status
 	- created_at
 	- last_seen_at
 
@@ -82,6 +112,15 @@ Tables:
 	- request_tokens
 	- response_tokens
 	- estimated_cost
+	- created_at
+
+- `credit_ledger`
+	- id
+	- user_id
+	- event_type
+	- credits_delta
+	- balance_after
+	- reference_id
 	- created_at
 
 - `assistant_runs`
@@ -105,7 +144,22 @@ Phase 1 should enforce:
 - per-user request limits
 - daily Vision call caps
 - per-user rate limiting
-- hard fail when quota is exhausted
+- hard fail when prepaid credits are exhausted
+- top-up before access resumes
+
+Preparation before building register/login
+-----------------------------------------
+
+Before implementing the flow, confirm these basics:
+
+1. Sign-in method: passwordless email link for phase 1.
+2. Session storage: local file on disk, not env vars.
+3. Backend contract: one endpoint for login start, one for login confirm, one for session lookup.
+4. Profile bootstrap: create the `users` row on first successful auth.
+5. Account state: start as active with zero or trial credits.
+6. Failure handling: clear expired sessions and ask the user to log in again.
+7. CLI UX: `caesim login`, `caesim whoami`, and auto-attach session on `--ai-assist`.
+8. Security: never store provider secrets in the CLI.
 
 Prototype flow
 --------------
@@ -137,7 +191,7 @@ Implementation steps
 Recommendation
 --------------
 
-For phase 1, use managed Postgres plus hosted auth.
+For phase 1, use managed Postgres plus hosted auth, with prepaid credits.
 That keeps login data centralized, secure, and easy to meter.
 The CLI should only store a local session token, not provider credentials.
 
@@ -180,4 +234,5 @@ That means:
 - local prototype: Postgres on localhost or a dev container
 - production MVP: hosted auth + managed Postgres
 - the CLI never stores provider secrets
+- usage is gated by prepaid credit balance instead of plan tiers
 

@@ -147,6 +147,13 @@ cargo run -- --ai-assist
 It asks for a natural-language request, sends it to Backboard, and shows a suggested `caesim` command before execution.
 Set `BACKBOARD_API_KEY_CAESIM` in your environment before using it.
 
+For local account setup and session reuse:
+
+```bash
+caesim login
+caesim whoami
+```
+
 You can customize the assistant's system prompt by setting `BACKBOARD_PROMPT` in your `.env`. Example:
 
 ```bash
