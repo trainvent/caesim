@@ -126,11 +126,11 @@ struct CreditsArgs {
 enum CreditsCommand {
     /// Show current credit balance
     Balance,
-    /// Add credits to account (in dollars)
+    /// Add toy credits to account
     Add {
-        /// Amount in dollars (e.g., 10.00)
+        /// Amount in credits (e.g., 100)
         #[arg(long)]
-        amount: String,
+        amount: i64,
     },
 }
 
@@ -154,6 +154,9 @@ struct RunReport {
     moved_count: usize,
     cut_dir: String,
     complexity: ComplexityEstimate,
+    vision_credit_cost: Option<i64>,
+    credit_balance_before: Option<i64>,
+    credit_balance_after: Option<i64>,
     entries: Vec<ReportEntry>,
     vision_errors: Vec<String>,
 }
@@ -324,7 +327,7 @@ fn run_whoami() -> Result<()> {
                 eprintln!("Signed in as {}", profile.email);
                 eprintln!("User ID: {}", profile.user_id);
                 eprintln!("Account status: {}", profile.account_status);
-                eprintln!("Credit balance: {}", profile.credit_balance);
+                eprintln!("Credit balance: {} credits", profile.credit_balance);
                 eprintln!("Session expires at: {}", profile.expires_at);
                 Ok(())
             }
@@ -416,15 +419,14 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
         match args.command {
             Some(CreditsCommand::Balance) | None => {
                 let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
-                eprintln!("Credit balance: ${:.2}", me.credit_balance as f64 / 100.0);
+                eprintln!("Credit balance: {} credits", me.credit_balance);
                 Ok(())
             }
             Some(CreditsCommand::Add { amount }) => {
-                let cents = (amount.parse::<f64>()? * 100.0) as i64;
-                auth::add_credits(&supabase_url, &session.session_token, cents).await?;
-                eprintln!("Added ${} to your account.", amount);
+                auth::add_credits(&supabase_url, &supabase_key, &session.session_token, amount).await?;
+                eprintln!("Added {} credits.", amount);
                 let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
-                eprintln!("New balance: ${:.2}", me.credit_balance as f64 / 100.0);
+                eprintln!("New balance: {} credits", me.credit_balance);
                 Ok(())
             }
         }
@@ -570,6 +572,39 @@ fn run_cut(args: CutArgs) -> Result<()> {
         vision_features.push("LABEL_DETECTION".to_string());
     }
 
+    let mut vision_credit_cost = None;
+    let mut credit_balance_before = None;
+    let mut credit_balance_after = None;
+    let mut vision_credit_runtime = None;
+    let mut vision_credit_supabase_url = None;
+    let mut vision_credit_supabase_key = None;
+    let mut vision_credit_session_token = None;
+
+    if args.vision {
+        let runtime = Runtime::new().context("failed to create async runtime for credit checks")?;
+        let session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
+        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let supabase_key = auth::default_supabase_anon_key()?;
+        let me = runtime.block_on(auth::fetch_me(&supabase_url, &supabase_key, &session.session_token))?;
+        let cost = estimate_vision_credit_cost(images.len());
+
+        if me.credit_balance < cost {
+            return Err(anyhow!(
+                "insufficient credits for vision run: have {}, need {}",
+                me.credit_balance,
+                cost
+            ));
+        }
+
+        eprintln!("Toy credits: vision run will cost {} credit(s); current balance is {}.", cost, me.credit_balance);
+        vision_credit_cost = Some(cost);
+        credit_balance_before = Some(me.credit_balance);
+        vision_credit_runtime = Some(runtime);
+        vision_credit_supabase_url = Some(supabase_url);
+        vision_credit_supabase_key = Some(supabase_key);
+        vision_credit_session_token = Some(session.session_token);
+    }
+
     // Optional: call python vision backend to get labels/safesearch/text/web/image properties.
     let vision_map = if args.vision {
         eprintln!(
@@ -588,6 +623,24 @@ fn run_cut(args: CutArgs) -> Result<()> {
     } else {
         None
     };
+
+    if let (Some(runtime), Some(supabase_url), Some(supabase_key), Some(session_token), Some(cost)) = (
+        vision_credit_runtime.as_ref(),
+        vision_credit_supabase_url.as_ref(),
+        vision_credit_supabase_key.as_ref(),
+        vision_credit_session_token.as_ref(),
+        vision_credit_cost,
+    ) {
+        let new_balance = runtime.block_on(auth::consume_credits(
+            supabase_url,
+            supabase_key,
+            session_token,
+            cost,
+        ))?;
+        credit_balance_after = Some(new_balance);
+        eprintln!("Toy credits: charged {} credit(s); new balance is {}.", cost, new_balance);
+    }
+
     let vision_duplicate_sources = vision_map
         .as_ref()
         .map(|vm| build_vision_duplicate_sources(&images, vm))
@@ -721,6 +774,9 @@ fn run_cut(args: CutArgs) -> Result<()> {
         moved_count,
         cut_dir: cut_dir_path.to_string_lossy().to_string(),
         complexity,
+        vision_credit_cost,
+        credit_balance_before,
+        credit_balance_after,
         entries,
         vision_errors: {
             let mut v: Vec<String> = Vec::new();
@@ -1117,6 +1173,14 @@ fn estimate_complexity(image_count: usize, vision_enabled: bool) -> ComplexityEs
     .to_string();
 
     ComplexityEstimate { score, tier, notes }
+}
+
+fn estimate_vision_credit_cost(image_count: usize) -> i64 {
+    if image_count == 0 {
+        0
+    } else {
+        image_count as i64
+    }
 }
 
 fn vision_features_for_rule(rule: &str) -> Vec<String> {

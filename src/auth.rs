@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use std::{env, fs, path::PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -217,7 +218,7 @@ pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, pa
         return Err(anyhow!("password login failed with {}: {}", status, body));
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)
+    let json: Value = serde_json::from_str(&body)
         .context("failed to parse password login response")?;
     let session_token = extract_access_token(&json)?;
     let user = json
@@ -248,7 +249,9 @@ pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, pa
 
 pub async fn set_password(base_url: &str, anon_key: &str, session_token: &str, new_password: &str) -> Result<()> {
     validate_password(new_password)?;
-    update_supabase_password(base_url, anon_key, session_token, new_password).await
+    let mut patch = Map::new();
+    patch.insert("has_password".to_string(), Value::Bool(true));
+    update_supabase_user(base_url, anon_key, session_token, Some(new_password), patch).await
 }
 
 pub async fn change_password(base_url: &str, anon_key: &str, session_token: &str, current_password: &str, new_password: &str) -> Result<()> {
@@ -312,8 +315,30 @@ pub async fn fetch_me(base_url: &str, anon_key: &str, session_token: &str) -> Re
     })
 }
 
-pub async fn add_credits(_base_url: &str, _session_token: &str, _amount_cents: i64) -> Result<()> {
-    Err(anyhow!("credit top-ups are not available without a hosted billing service"))
+pub async fn add_credits(base_url: &str, anon_key: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
+    if amount_credits <= 0 {
+        return Err(anyhow!("amount must be greater than 0"));
+    }
+
+    let current = fetch_me(base_url, anon_key, session_token).await?.credit_balance;
+    let new_balance = current.saturating_add(amount_credits);
+    set_credit_balance(base_url, anon_key, session_token, new_balance).await?;
+    Ok(new_balance)
+}
+
+pub async fn consume_credits(base_url: &str, anon_key: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
+    if amount_credits <= 0 {
+        return Err(anyhow!("amount must be greater than 0"));
+    }
+
+    let current = fetch_me(base_url, anon_key, session_token).await?.credit_balance;
+    if current < amount_credits {
+        return Err(anyhow!("insufficient credits: have {current}, need {amount_credits}"));
+    }
+
+    let new_balance = current - amount_credits;
+    set_credit_balance(base_url, anon_key, session_token, new_balance).await?;
+    Ok(new_balance)
 }
 
 fn unix_ts() -> i64 {
@@ -331,7 +356,7 @@ fn validate_password(password: &str) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_supabase_user_raw(base_url: &str, anon_key: &str, session_token: &str) -> Result<serde_json::Value> {
+async fn fetch_supabase_user_raw(base_url: &str, anon_key: &str, session_token: &str) -> Result<Value> {
     let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
     let response = Client::new()
         .get(&url)
@@ -362,7 +387,7 @@ async fn fetch_supabase_user(base_url: &str, anon_key: &str, session_token: &str
     Ok(CurrentUser { email })
 }
 
-async fn supabase_verify_otp(base_url: &str, anon_key: &str, email: &str, token: &str) -> Result<serde_json::Value> {
+async fn supabase_verify_otp(base_url: &str, anon_key: &str, email: &str, token: &str) -> Result<Value> {
     let url = format!("{}/auth/v1/verify", normalize_base_url(base_url));
     let body = serde_json::json!({
         "email": email.trim().to_ascii_lowercase(),
@@ -382,14 +407,13 @@ async fn supabase_verify_otp(base_url: &str, anon_key: &str, email: &str, token:
     let status = response.status();
     let body_text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("Supabase verification failed with {}: {}", status, body_text));
+        return Err(anyhow!("Supabase verification failed: {}", body_text));
     }
 
-    serde_json::from_str(&body_text)
-        .context("failed to parse Supabase verification response")
+    serde_json::from_str(&body_text).context("failed to parse Supabase verification response")
 }
 
-fn extract_access_token(json: &serde_json::Value) -> Result<String> {
+fn extract_access_token(json: &Value) -> Result<String> {
     json
         .get("access_token")
         .and_then(|v| v.as_str())
@@ -403,34 +427,59 @@ fn extract_access_token(json: &serde_json::Value) -> Result<String> {
         .ok_or_else(|| anyhow!("Supabase response did not include an access token"))
 }
 
+async fn set_credit_balance(base_url: &str, anon_key: &str, session_token: &str, credit_balance: i64) -> Result<()> {
+    let mut patch = Map::new();
+    patch.insert("credit_balance".to_string(), Value::from(credit_balance));
+    update_supabase_user(base_url, anon_key, session_token, None, patch).await
+}
+
 async fn update_supabase_password(base_url: &str, anon_key: &str, session_token: &str, new_password: &str) -> Result<()> {
+    let mut patch = Map::new();
+    patch.insert("has_password".to_string(), Value::Bool(true));
+    update_supabase_user(base_url, anon_key, session_token, Some(new_password), patch).await
+}
+
+async fn update_supabase_user(base_url: &str, anon_key: &str, session_token: &str, new_password: Option<&str>, metadata_patch: Map<String, Value>) -> Result<()> {
+    let mut metadata = fetch_supabase_user_metadata(base_url, anon_key, session_token).await?;
+    for (key, value) in metadata_patch {
+        metadata.insert(key, value);
+    }
+
     let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
-    let body = serde_json::json!({
-        "password": new_password,
-        "user_metadata": {
-            "has_password": true
-        }
-    });
+    let mut body = Map::new();
+    if let Some(new_password) = new_password {
+        body.insert("password".to_string(), Value::String(new_password.to_string()));
+    }
+    body.insert("user_metadata".to_string(), Value::Object(metadata));
 
     let response = Client::new()
         .put(&url)
         .header("apikey", anon_key)
         .header("Authorization", format!("Bearer {session_token}"))
         .header("Content-Type", "application/json")
-        .json(&body)
+        .json(&Value::Object(body))
         .send()
         .await
-        .with_context(|| format!("failed to update password at {url}"))?;
+        .with_context(|| format!("failed to update user profile at {url}"))?;
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
-        return Err(anyhow!("Supabase password update failed: {}", error_text));
+        return Err(anyhow!("Supabase profile update failed: {}", error_text));
     }
 
     Ok(())
 }
 
-fn extract_boolean_metadata(user_json: &serde_json::Value, key: &str) -> bool {
+async fn fetch_supabase_user_metadata(base_url: &str, anon_key: &str, session_token: &str) -> Result<Map<String, Value>> {
+    let json = fetch_supabase_user_raw(base_url, anon_key, session_token).await?;
+    Ok(json
+        .get("user_metadata")
+        .or_else(|| json.get("raw_user_meta_data"))
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default())
+}
+
+fn extract_boolean_metadata(user_json: &Value, key: &str) -> bool {
     ["user_metadata", "raw_user_meta_data"]
         .into_iter()
         .find_map(|field| {
@@ -442,7 +491,7 @@ fn extract_boolean_metadata(user_json: &serde_json::Value, key: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn extract_integer_metadata(user_json: &serde_json::Value, key: &str) -> Option<i64> {
+fn extract_integer_metadata(user_json: &Value, key: &str) -> Option<i64> {
     ["user_metadata", "raw_user_meta_data"]
         .into_iter()
         .find_map(|field| {
