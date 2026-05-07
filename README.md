@@ -147,7 +147,14 @@ cargo run -- --ai-assist
 It asks for a natural-language request, sends it to Backboard, and shows a suggested `caesim` command before execution.
 Set `BACKBOARD_API_KEY_CAESIM` in your environment before using it.
 
-For local account setup and session reuse:
+For account setup and session reuse with Supabase Auth:
+
+```bash
+export CAESIM_SUPABASE_URL="https://<project-ref>.supabase.co"
+export CAESIM_SUPABASE_ANON_KEY="<anon-key>"
+```
+
+Then run:
 
 ```bash
 caesim login

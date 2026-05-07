@@ -1,6 +1,7 @@
-# Caesim Backend Prototype
+# Legacy Caesim Backend Prototype
 
-This is the first usable backend scaffold for Caesim.
+This folder keeps the old Rust backend prototype for reference.
+The current product path no longer depends on a hosted Rust backend.
 
 ## What it does
 
@@ -12,6 +13,8 @@ This is the first usable backend scaffold for Caesim.
 - returns a simple command suggestion for image-library cleanup requests
 
 ## Run locally
+
+Only use this if you are experimenting with the legacy proxy layer.
 
 ```bash
 cd backend

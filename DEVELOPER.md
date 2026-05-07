@@ -9,6 +9,7 @@ Build a safe image-library trimming utility with:
 1. One primary command: `caesim cut <target> --rule "<description>"`
 2. Non-destructive default behavior (move, do not delete)
 3. Reviewable output (`cut` folder + manifest/log)
+4. Direct Supabase Auth for account/session handling; no hosted Rust backend in the product path
 
 ## 2. CLI Specification (MVP)
 
@@ -168,3 +169,6 @@ Also write a compact mapping file for easy rollback:
 ## 10. Source Note
 
 Reference used: `https://caesim.com/` (accessed April 23, 2026). The page explicitly presents Caesim as an image-library trimming concept and states “Not a product.”
+
+## 11. Sources
+https://docs.rs/supabase-lib-rs/

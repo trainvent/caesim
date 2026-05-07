@@ -213,7 +213,8 @@ fn main() -> Result<()> {
 fn run_login(args: LoginArgs) -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
-        let backend_base = auth::default_backend_base_url();
+        let supabase_url = auth::default_supabase_url()?;
+        let supabase_key = auth::default_supabase_anon_key()?;
         eprintln!("\n=== Caesim Login ===\n");
 
         let email = match args.email {
@@ -225,14 +226,14 @@ fn run_login(args: LoginArgs) -> Result<()> {
             let code = if let Some(code) = args.verification_code {
                 code
             } else {
-                let login = auth::start_login(&backend_base, &email).await?;
+                let login = auth::start_login(&supabase_url, &supabase_key, &email).await?;
                 eprintln!("{}", login.message);
                 prompt_line("Verification code: ")?
             };
 
-            let session = auth::verify_login(&backend_base, &email, &code).await?;
+            let session = auth::verify_login(&supabase_url, &supabase_key, &email, &code).await?;
             auth::save_session(&auth::StoredSession {
-                backend_base_url: backend_base.clone(),
+                supabase_url: supabase_url.clone(),
                 user_id: session.user_id.clone(),
                 email: session.email.clone(),
                 session_token: session.session_token.clone(),
@@ -250,19 +251,19 @@ fn run_login(args: LoginArgs) -> Result<()> {
                 if new_password != confirm_password {
                     return Err(anyhow!("password confirmation does not match"));
                 }
-                auth::set_password(&backend_base, &session.session_token, &new_password).await?;
+                auth::set_password(&supabase_url, &supabase_key, &session.session_token, &new_password).await?;
                 eprintln!("Password set successfully.");
             }
         } else {
             // Auto-detect: check if user exists
-            let user_exists = auth::check_user_exists(&backend_base, &email).await.unwrap_or(false);
+            let user_exists = auth::check_user_exists(&supabase_url, &supabase_key, &email).await.unwrap_or(false);
 
             if user_exists {
                 // Existing user: password login
                 let password = prompt_password("Password: ")?;
-                let session = auth::login_with_password(&backend_base, &email, &password).await?;
+                let session = auth::login_with_password(&supabase_url, &supabase_key, &email, &password).await?;
                 auth::save_session(&auth::StoredSession {
-                    backend_base_url: backend_base,
+                    supabase_url: supabase_url.clone(),
                     user_id: session.user_id.clone(),
                     email: session.email.clone(),
                     session_token: session.session_token.clone(),
@@ -278,14 +279,14 @@ fn run_login(args: LoginArgs) -> Result<()> {
                 let code = if let Some(code) = args.verification_code {
                     code
                 } else {
-                    let login = auth::start_login(&backend_base, &email).await?;
+                    let login = auth::start_login(&supabase_url, &supabase_key, &email).await?;
                     eprintln!("{}", login.message);
                     prompt_line("Verification code: ")?
                 };
 
-                let session = auth::verify_login(&backend_base, &email, &code).await?;
+                let session = auth::verify_login(&supabase_url, &supabase_key, &email, &code).await?;
                 auth::save_session(&auth::StoredSession {
-                    backend_base_url: backend_base.clone(),
+                    supabase_url: supabase_url.clone(),
                     user_id: session.user_id.clone(),
                     email: session.email.clone(),
                     session_token: session.session_token.clone(),
@@ -302,7 +303,7 @@ fn run_login(args: LoginArgs) -> Result<()> {
                 if new_password != confirm_password {
                     return Err(anyhow!("password confirmation does not match"));
                 }
-                auth::set_password(&backend_base, &session.session_token, &new_password).await?;
+                auth::set_password(&supabase_url, &supabase_key, &session.session_token, &new_password).await?;
                 eprintln!("Password set successfully.");
             }
         }
@@ -314,10 +315,9 @@ fn run_whoami() -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
         let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
-        let backend_base = std::env::var("CAESIM_BACKEND_URL")
-            .ok()
-            .unwrap_or_else(|| session.backend_base_url.clone());
-        let me = auth::fetch_me(&backend_base, &session.session_token).await;
+        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let supabase_key = auth::default_supabase_anon_key()?;
+        let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await;
 
         match me {
             Ok(profile) => {
@@ -348,11 +348,12 @@ fn run_logout() -> Result<()> {
 fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
-        let backend_base = auth::default_backend_base_url();
+        let supabase_url = auth::default_supabase_url()?;
+        let supabase_key = auth::default_supabase_anon_key()?;
 
         if args.otp {
             let email = prompt_line("Email address: ")?;
-            let login = auth::start_login(&backend_base, &email).await?;
+            let login = auth::start_login(&supabase_url, &supabase_key, &email).await?;
             eprintln!("{}", login.message);
             let code = prompt_line("Verification code: ")?;
             let new_password = prompt_password("New password: ")?;
@@ -361,17 +362,16 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
                 return Err(anyhow!("password confirmation does not match"));
             }
 
-            auth::change_password_with_otp(&backend_base, &email, &code, &new_password).await?;
+            auth::change_password_with_otp(&supabase_url, &supabase_key, &email, &code, &new_password).await?;
             eprintln!("Password changed successfully via OTP.");
             return Ok(());
         }
 
         let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
-        let backend_base = std::env::var("CAESIM_BACKEND_URL")
-            .ok()
-            .unwrap_or_else(|| session.backend_base_url.clone());
+        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let supabase_key = auth::default_supabase_anon_key()?;
 
-        let profile = auth::fetch_me(&backend_base, &session.session_token).await?;
+        let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
 
         if !profile.has_password {
             eprintln!("No password is currently set. Setting a new password...");
@@ -380,7 +380,7 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
             if new_password != confirm_password {
                 return Err(anyhow!("password confirmation does not match"));
             }
-            auth::set_password(&backend_base, &session.session_token, &new_password).await?;
+            auth::set_password(&supabase_url, &supabase_key, &session.session_token, &new_password).await?;
             eprintln!("Password set successfully.");
             return Ok(());
         }
@@ -393,7 +393,8 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
         }
 
         auth::change_password(
-            &backend_base,
+            &supabase_url,
+            &supabase_key,
             &session.session_token,
             &current_password,
             &new_password,
@@ -409,21 +410,20 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
         let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
-        let backend_base = std::env::var("CAESIM_BACKEND_URL")
-            .ok()
-            .unwrap_or_else(|| session.backend_base_url.clone());
+        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let supabase_key = auth::default_supabase_anon_key()?;
 
         match args.command {
             Some(CreditsCommand::Balance) | None => {
-                let me = auth::fetch_me(&backend_base, &session.session_token).await?;
+                let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
                 eprintln!("Credit balance: ${:.2}", me.credit_balance as f64 / 100.0);
                 Ok(())
             }
             Some(CreditsCommand::Add { amount }) => {
                 let cents = (amount.parse::<f64>()? * 100.0) as i64;
-                auth::add_credits(&backend_base, &session.session_token, cents).await?;
+                auth::add_credits(&supabase_url, &session.session_token, cents).await?;
                 eprintln!("Added ${} to your account.", amount);
-                let me = auth::fetch_me(&backend_base, &session.session_token).await?;
+                let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
                 eprintln!("New balance: ${:.2}", me.credit_balance as f64 / 100.0);
                 Ok(())
             }

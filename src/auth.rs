@@ -5,7 +5,8 @@ use std::{env, fs, path::PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StoredSession {
-    pub backend_base_url: String,
+    #[serde(alias = "backend_base_url")]
+    pub supabase_url: String,
     pub user_id: String,
     pub email: String,
     pub session_token: String,
@@ -34,6 +35,12 @@ pub struct PasswordLoginResponse {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Serialize)]
+struct PasswordLoginRequest {
+    email: String,
+    password: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct MeResponse {
     pub user_id: String,
@@ -44,53 +51,30 @@ pub struct MeResponse {
     pub expires_at: i64,
 }
 
-#[derive(Debug, Serialize)]
-struct LoginRequest {
-    email: String,
+pub fn default_supabase_url() -> Result<String> {
+    env::var("CAESIM_SUPABASE_URL")
+        .or_else(|_| env::var("SUPABASE_URL"))
+        .context("CAESIM_SUPABASE_URL or SUPABASE_URL environment variable not set")
 }
 
-#[derive(Debug, Serialize)]
-struct VerifyRequest {
-    email: String,
-    verification_code: String,
+pub fn default_supabase_anon_key() -> Result<String> {
+    env::var("CAESIM_SUPABASE_ANON_KEY")
+        .or_else(|_| env::var("SUPABASE_ANON_KEY"))
+        .or_else(|_| env::var("SUPABASE_KEY"))
+        .context("CAESIM_SUPABASE_ANON_KEY, SUPABASE_ANON_KEY, or SUPABASE_KEY environment variable not set")
 }
 
-#[derive(Debug, Serialize)]
-struct PasswordLoginRequest {
-    email: String,
-    password: String,
-}
-
-#[derive(Debug, Serialize)]
-struct SetPasswordRequest {
-    password: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ChangePasswordRequest {
-    current_password: String,
-    new_password: String,
-}
-
-#[derive(Debug, Serialize)]
-struct ChangePasswordOtpRequest {
-    email: String,
-    verification_code: String,
-    new_password: String,
-}
-
-pub fn default_backend_base_url() -> String {
-    env::var("CAESIM_BACKEND_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string())
-}
-
-pub async fn check_user_exists(base_url: &str, email: &str) -> Result<bool> {
-    let url = format!("{}/v1/auth/user-exists", normalize_base_url(base_url));
+pub async fn check_user_exists(base_url: &str, anon_key: &str, email: &str) -> Result<bool> {
+    let url = format!("{}/auth/v1/otp", normalize_base_url(base_url));
     let client = Client::new();
     let resp = client
         .post(&url)
-        .json(&LoginRequest {
-            email: email.trim().to_string(),
-        })
+        .header("apikey", anon_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "email": email.trim().to_string(),
+            "create_user": false,
+        }))
         .send()
         .await
         .with_context(|| format!("failed to check user existence at {url}"))?;
@@ -101,14 +85,7 @@ pub async fn check_user_exists(base_url: &str, email: &str) -> Result<bool> {
         return Err(anyhow!("user existence check failed with {}: {}", status, body));
     }
 
-    #[derive(Deserialize)]
-    struct ExistsResponse {
-        exists: bool,
-    }
-
-    let response: ExistsResponse = serde_json::from_str(&body)
-        .context("failed to parse existence check response")?;
-    Ok(response.exists)
+    Ok(true)
 }
 
 pub fn session_path() -> Result<PathBuf> {
@@ -162,14 +139,18 @@ fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
-pub async fn start_login(base_url: &str, email: &str) -> Result<LoginResponse> {
-    let url = format!("{}/v1/auth/login", normalize_base_url(base_url));
+pub async fn start_login(base_url: &str, anon_key: &str, email: &str) -> Result<LoginResponse> {
+    let url = format!("{}/auth/v1/otp", normalize_base_url(base_url));
     let client = Client::new();
     let resp = client
         .post(&url)
-        .json(&LoginRequest {
-            email: email.trim().to_string(),
-        })
+        .header("apikey", anon_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "email": email.trim().to_string(),
+            "create_user": true,
+            "gotrue_meta_security": {}
+        }))
         .send()
         .await
         .with_context(|| format!("failed to send login request to {url}"))?;
@@ -180,40 +161,48 @@ pub async fn start_login(base_url: &str, email: &str) -> Result<LoginResponse> {
         return Err(anyhow!("login request failed with {}: {}", status, body));
     }
 
-    let response: LoginResponse = serde_json::from_str(&body)
-        .context("failed to parse login response")?;
-    Ok(response)
+    let email = email.trim().to_string();
+    Ok(LoginResponse {
+        message: format!("Check the email inbox for {email}. Paste the 6-digit OTP code back into caesim."),
+    })
 }
 
-pub async fn verify_login(base_url: &str, email: &str, verification_code: &str) -> Result<VerifyResponse> {
-    let url = format!("{}/v1/auth/verify", normalize_base_url(base_url));
+pub async fn verify_login(base_url: &str, anon_key: &str, email: &str, verification_code: &str) -> Result<VerifyResponse> {
+    let json = supabase_verify_otp(base_url, anon_key, email, verification_code).await?;
+    let session_token = extract_access_token(&json)?;
+    let user = json
+        .get("user")
+        .cloned()
+        .ok_or_else(|| anyhow!("Supabase response did not include a user"))?;
+
+    let user_id = user
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Supabase response did not include a user id"))?
+        .to_string();
+    let email = user
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| email.trim().to_ascii_lowercase());
+
+    let expires_at = unix_ts() + 30 * 24 * 60 * 60;
+
+    Ok(VerifyResponse {
+        user_id,
+        email,
+        session_token,
+        expires_at,
+    })
+}
+
+pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, password: &str) -> Result<PasswordLoginResponse> {
+    let url = format!("{}/auth/v1/token?grant_type=password", normalize_base_url(base_url));
     let client = Client::new();
     let resp = client
         .post(&url)
-        .json(&VerifyRequest {
-            email: email.trim().to_string(),
-            verification_code: verification_code.trim().to_string(),
-        })
-        .send()
-        .await
-        .with_context(|| format!("failed to send verification request to {url}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("verification request failed with {}: {}", status, body));
-    }
-
-    let response: VerifyResponse = serde_json::from_str(&body)
-        .context("failed to parse verify response")?;
-    Ok(response)
-}
-
-pub async fn login_with_password(base_url: &str, email: &str, password: &str) -> Result<PasswordLoginResponse> {
-    let url = format!("{}/v1/auth/login/password", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
-        .post(&url)
+        .header("apikey", anon_key)
+        .header("Content-Type", "application/json")
         .json(&PasswordLoginRequest {
             email: email.trim().to_string(),
             password: password.to_string(),
@@ -228,121 +217,243 @@ pub async fn login_with_password(base_url: &str, email: &str, password: &str) ->
         return Err(anyhow!("password login failed with {}: {}", status, body));
     }
 
-    let response: PasswordLoginResponse = serde_json::from_str(&body)
+    let json: serde_json::Value = serde_json::from_str(&body)
         .context("failed to parse password login response")?;
-    Ok(response)
+    let session_token = extract_access_token(&json)?;
+    let user = json
+        .get("user")
+        .cloned()
+        .ok_or_else(|| anyhow!("Supabase response did not include a user"))?;
+
+    let user_id = user
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Supabase response did not include a user id"))?
+        .to_string();
+    let user_email = user
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| email.trim().to_ascii_lowercase());
+
+    let expires_at = unix_ts() + 30 * 24 * 60 * 60;
+
+    Ok(PasswordLoginResponse {
+        user_id,
+        email: user_email,
+        session_token,
+        expires_at,
+    })
 }
 
-pub async fn set_password(base_url: &str, session_token: &str, new_password: &str) -> Result<()> {
-    let url = format!("{}/v1/auth/set-password", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
-        .post(&url)
-        .bearer_auth(session_token)
-        .json(&SetPasswordRequest {
-            password: new_password.to_string(),
-        })
+pub async fn set_password(base_url: &str, anon_key: &str, session_token: &str, new_password: &str) -> Result<()> {
+    validate_password(new_password)?;
+    update_supabase_password(base_url, anon_key, session_token, new_password).await
+}
+
+pub async fn change_password(base_url: &str, anon_key: &str, session_token: &str, current_password: &str, new_password: &str) -> Result<()> {
+    validate_password(new_password)?;
+    let user = fetch_supabase_user(base_url, anon_key, session_token).await?;
+
+    let verify_url = format!("{}/auth/v1/token?grant_type=password", normalize_base_url(base_url));
+    let verify_body = serde_json::json!({
+        "email": user.email,
+        "password": current_password
+    });
+
+    let verify_response = Client::new()
+        .post(&verify_url)
+        .header("apikey", anon_key)
+        .header("Content-Type", "application/json")
+        .json(&verify_body)
         .send()
         .await
-        .with_context(|| format!("failed to send set password request to {url}"))?;
+        .with_context(|| format!("failed to verify current password at {verify_url}"))?;
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("set password failed with {}: {}", status, body));
+    if !verify_response.status().is_success() {
+        let error_text = verify_response.text().await.unwrap_or_default();
+        return Err(anyhow!("current password verification failed: {}", error_text));
     }
 
+    update_supabase_password(base_url, anon_key, session_token, new_password).await
+}
+
+pub async fn change_password_with_otp(base_url: &str, anon_key: &str, email: &str, verification_code: &str, new_password: &str) -> Result<()> {
+    validate_password(new_password)?;
+    let json = supabase_verify_otp(base_url, anon_key, email, verification_code).await?;
+    let token = extract_access_token(&json)?;
+    update_supabase_password(base_url, anon_key, &token, new_password).await
+}
+
+pub async fn fetch_me(base_url: &str, anon_key: &str, session_token: &str) -> Result<MeResponse> {
+    let json = fetch_supabase_user_raw(base_url, anon_key, session_token).await?;
+
+    let user_id = json
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("user has no id"))?
+        .to_string();
+    let email = json
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("user has no email"))?
+        .to_string();
+
+    let has_password = extract_boolean_metadata(&json, "has_password");
+    let credit_balance = extract_integer_metadata(&json, "credit_balance").unwrap_or(0);
+
+    Ok(MeResponse {
+        user_id,
+        email,
+        account_status: "active".to_string(),
+        credit_balance,
+        has_password,
+        expires_at: unix_ts() + 30 * 24 * 60 * 60,
+    })
+}
+
+pub async fn add_credits(_base_url: &str, _session_token: &str, _amount_cents: i64) -> Result<()> {
+    Err(anyhow!("credit top-ups are not available without a hosted billing service"))
+}
+
+fn unix_ts() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn validate_password(password: &str) -> Result<()> {
+    if password.trim().len() < 8 {
+        return Err(anyhow!("password must be at least 8 characters"));
+    }
     Ok(())
 }
 
-pub async fn change_password(base_url: &str, session_token: &str, current_password: &str, new_password: &str) -> Result<()> {
-    let url = format!("{}/v1/auth/change-password", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
-        .post(&url)
-        .bearer_auth(session_token)
-        .json(&ChangePasswordRequest {
-            current_password: current_password.to_string(),
-            new_password: new_password.to_string(),
-        })
-        .send()
-        .await
-        .with_context(|| format!("failed to send change password request to {url}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("change password failed with {}: {}", status, body));
-    }
-
-    Ok(())
-}
-
-pub async fn change_password_with_otp(base_url: &str, email: &str, verification_code: &str, new_password: &str) -> Result<()> {
-    let url = format!("{}/v1/auth/change-password/otp", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
-        .post(&url)
-        .json(&ChangePasswordOtpRequest {
-            email: email.trim().to_string(),
-            verification_code: verification_code.to_string(),
-            new_password: new_password.to_string(),
-        })
-        .send()
-        .await
-        .with_context(|| format!("failed to send OTP password change request to {url}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("OTP password change failed with {}: {}", status, body));
-    }
-
-    Ok(())
-}
-
-pub async fn fetch_me(base_url: &str, session_token: &str) -> Result<MeResponse> {
-    let url = format!("{}/v1/auth/me", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
+async fn fetch_supabase_user_raw(base_url: &str, anon_key: &str, session_token: &str) -> Result<serde_json::Value> {
+    let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
+    let response = Client::new()
         .get(&url)
-        .bearer_auth(session_token)
+        .header("apikey", anon_key)
+        .header("Authorization", format!("Bearer {session_token}"))
         .send()
         .await
-        .with_context(|| format!("failed to send me request to {url}"))?;
+        .with_context(|| format!("failed to get user info at {url}"))?;
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("whoami request failed with {}: {}", status, body));
+    if !response.status().is_success() {
+        return Err(anyhow!("invalid token"));
     }
 
-    let response: MeResponse = serde_json::from_str(&body)
-        .context("failed to parse me response")?;
-    Ok(response)
+    response
+        .json()
+        .await
+        .context("failed to parse Supabase user response")
 }
 
-#[derive(Debug, Serialize)]
-struct AddCreditsRequest {
-    amount: i64,
+async fn fetch_supabase_user(base_url: &str, anon_key: &str, session_token: &str) -> Result<CurrentUser> {
+    let json = fetch_supabase_user_raw(base_url, anon_key, session_token).await?;
+    let email = json
+        .get("email")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("user has no email"))?
+        .to_string();
+
+    Ok(CurrentUser { email })
 }
 
-pub async fn add_credits(base_url: &str, session_token: &str, amount_cents: i64) -> Result<()> {
-    let url = format!("{}/v1/credits/add", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
+async fn supabase_verify_otp(base_url: &str, anon_key: &str, email: &str, token: &str) -> Result<serde_json::Value> {
+    let url = format!("{}/auth/v1/verify", normalize_base_url(base_url));
+    let body = serde_json::json!({
+        "email": email.trim().to_ascii_lowercase(),
+        "token": token.trim(),
+        "type": "email"
+    });
+
+    let response = Client::new()
         .post(&url)
-        .bearer_auth(session_token)
-        .json(&AddCreditsRequest { amount: amount_cents })
+        .header("apikey", anon_key)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()
         .await
-        .with_context(|| format!("failed to send add credits request to {url}"))?;
+        .with_context(|| format!("failed to contact Supabase at {url}"))?;
 
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
+    let status = response.status();
+    let body_text = response.text().await.unwrap_or_default();
     if !status.is_success() {
-        return Err(anyhow!("add credits request failed with {}: {}", status, body));
+        return Err(anyhow!("Supabase verification failed with {}: {}", status, body_text));
+    }
+
+    serde_json::from_str(&body_text)
+        .context("failed to parse Supabase verification response")
+}
+
+fn extract_access_token(json: &serde_json::Value) -> Result<String> {
+    json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            json.get("session")
+                .and_then(|s| s.get("access_token"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow!("Supabase response did not include an access token"))
+}
+
+async fn update_supabase_password(base_url: &str, anon_key: &str, session_token: &str, new_password: &str) -> Result<()> {
+    let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
+    let body = serde_json::json!({
+        "password": new_password,
+        "user_metadata": {
+            "has_password": true
+        }
+    });
+
+    let response = Client::new()
+        .put(&url)
+        .header("apikey", anon_key)
+        .header("Authorization", format!("Bearer {session_token}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .with_context(|| format!("failed to update password at {url}"))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("Supabase password update failed: {}", error_text));
     }
 
     Ok(())
+}
+
+fn extract_boolean_metadata(user_json: &serde_json::Value, key: &str) -> bool {
+    ["user_metadata", "raw_user_meta_data"]
+        .into_iter()
+        .find_map(|field| {
+            user_json
+                .get(field)
+                .and_then(|meta| meta.get(key))
+                .and_then(|value| value.as_bool())
+        })
+        .unwrap_or(false)
+}
+
+fn extract_integer_metadata(user_json: &serde_json::Value, key: &str) -> Option<i64> {
+    ["user_metadata", "raw_user_meta_data"]
+        .into_iter()
+        .find_map(|field| {
+            user_json
+                .get(field)
+                .and_then(|meta| meta.get(key))
+                .and_then(|value| value.as_i64())
+        })
+}
+
+#[derive(Debug)]
+struct CurrentUser {
+    email: String,
 }
