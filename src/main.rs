@@ -34,8 +34,10 @@ enum Commands {
     Cut(CutArgs),
     /// Configure and learn about Google Vision setup
     Vision(VisionArgs),
-    /// Sign in or create a local account session
+    /// Create a local account session with one-time password signup
     #[command(alias = "register")]
+    Signup(SignupArgs),
+    /// Sign in to an existing local account session with password
     Login(LoginArgs),
     /// Show the active local account session
     Whoami,
@@ -106,6 +108,13 @@ struct LoginArgs {
     /// Verification code from the email sent by Supabase
     #[arg(long = "verification-code")]
     verification_code: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct SignupArgs {
+    /// Email address to register
+    #[arg(long)]
+    email: Option<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -204,13 +213,81 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Cut(args)) => run_cut(args),
         Some(Commands::Vision(args)) => run_vision(args),
+        Some(Commands::Signup(args)) => run_signup(args),
         Some(Commands::Login(args)) => run_login(args),
         Some(Commands::Whoami) => run_whoami(),
         Some(Commands::ChangePassword(args)) => run_change_password(args),
         Some(Commands::Logout) => run_logout(),
         Some(Commands::Credits(args)) => run_credits(args),
-        None => Err(anyhow!("no command provided")),
+        None => Err(anyhow!("no command provided; run `caesim --help` to list available commands")),
     }
+}
+
+async fn complete_otp_session(
+    supabase_url: &str,
+    supabase_key: &str,
+    email: &str,
+    code: &str,
+    account_created: bool,
+) -> Result<()> {
+    let session = auth::verify_login(supabase_url, supabase_key, email, code).await?;
+    auth::save_session(&auth::StoredSession {
+        supabase_url: supabase_url.to_string(),
+        user_id: session.user_id.clone(),
+        email: session.email.clone(),
+        session_token: session.session_token.clone(),
+        expires_at: session.expires_at,
+        saved_at: current_unix_ts(),
+    })?;
+
+    if account_created {
+        eprintln!("Account created and signed in as {} ({})", session.email, session.user_id);
+    } else {
+        eprintln!("Signed in as {} ({})", session.email, session.user_id);
+    }
+    eprintln!("Session saved locally.");
+
+    if auth::default_supabase_service_role_key().is_some() {
+        let profile = auth::fetch_me(supabase_url, supabase_key, &session.user_id, &session.session_token).await?;
+        auth::sync_public_user_row(supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
+    } else {
+        eprintln!("Public user table sync skipped: set CAESIM_SUPABASE_SERVICE_ROLE_KEY to create/update the table row.");
+    }
+
+    let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
+    if set_now.trim().is_empty() || matches!(set_now.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        let new_password = prompt_password("New password: ")?;
+        let confirm_password = prompt_password("Confirm password: ")?;
+        if new_password != confirm_password {
+            return Err(anyhow!("password confirmation does not match"));
+        }
+        auth::set_password(supabase_url, supabase_key, &session.user_id, &session.session_token, &new_password).await?;
+        eprintln!("Password set successfully.");
+    }
+
+    Ok(())
+}
+
+fn run_signup(args: SignupArgs) -> Result<()> {
+    let runtime = Runtime::new().context("failed to create async runtime")?;
+    runtime.block_on(async move {
+        let supabase_url = auth::default_supabase_url()?;
+        let supabase_key = auth::default_supabase_anon_key()?;
+        eprintln!("\n=== Caesim Signup ===\n");
+
+        let email = match args.email {
+            Some(email) => email,
+            None => prompt_line("Email address: ")?,
+        };
+
+        eprintln!("Sending verification code to {}...", email);
+        let login = auth::start_login(&supabase_url, &supabase_key, &email).await?;
+        eprintln!("{}", login.message);
+        let code = prompt_line("Verification code: ")?;
+
+        complete_otp_session(&supabase_url, &supabase_key, &email, &code, true).await?;
+        Ok(())
+    })
 }
 
 fn run_login(args: LoginArgs) -> Result<()> {
@@ -234,54 +311,38 @@ fn run_login(args: LoginArgs) -> Result<()> {
                 prompt_line("Verification code: ")?
             };
 
-            let session = auth::verify_login(&supabase_url, &supabase_key, &email, &code).await?;
-            auth::save_session(&auth::StoredSession {
-                supabase_url: supabase_url.clone(),
-                user_id: session.user_id.clone(),
-                email: session.email.clone(),
-                session_token: session.session_token.clone(),
-                expires_at: session.expires_at,
-                saved_at: current_unix_ts(),
-            })?;
-
-            eprintln!("Signed in as {} ({})", session.email, session.user_id);
-            eprintln!("Session saved locally.");
-
-            let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
-            if set_now.trim().is_empty() || matches!(set_now.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
-                let new_password = prompt_password("New password: ")?;
-                let confirm_password = prompt_password("Confirm password: ")?;
-                if new_password != confirm_password {
-                    return Err(anyhow!("password confirmation does not match"));
-                }
-                auth::set_password(&supabase_url, &supabase_key, &session.session_token, &new_password).await?;
-                eprintln!("Password set successfully.");
-            }
-        } else {
-            let password = prompt_password("Password: ")?;
-            match auth::login_with_password(&supabase_url, &supabase_key, &email, &password).await {
-                Ok(session) => {
-                    auth::save_session(&auth::StoredSession {
-                        supabase_url: supabase_url.clone(),
-                        user_id: session.user_id.clone(),
-                        email: session.email.clone(),
-                        session_token: session.session_token.clone(),
-                        expires_at: session.expires_at,
-                        saved_at: current_unix_ts(),
-                    })?;
-
-                    eprintln!("Signed in as {} ({})", session.email, session.user_id);
-                    eprintln!("Session saved locally.");
-                }
-                Err(err) => {
-                    return Err(anyhow!(
-                        "password login failed without sending OTP; use --otp to create a new account or reset access. Details: {}",
-                        err
-                    ));
-                }
-            }
+            complete_otp_session(&supabase_url, &supabase_key, &email, &code, false).await?;
+            return Ok(());
         }
-        Ok(())
+
+        let password = prompt_password("Password: ")?;
+        match auth::login_with_password(&supabase_url, &supabase_key, &email, &password).await {
+            Ok(session) => {
+                auth::save_session(&auth::StoredSession {
+                    supabase_url: supabase_url.clone(),
+                    user_id: session.user_id.clone(),
+                    email: session.email.clone(),
+                    session_token: session.session_token.clone(),
+                    expires_at: session.expires_at,
+                    saved_at: current_unix_ts(),
+                })?;
+
+                eprintln!("Signed in as {} ({})", session.email, session.user_id);
+                eprintln!("Session saved locally.");
+
+                if auth::default_supabase_service_role_key().is_some() {
+                    let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
+                    auth::sync_public_user_row(&supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
+                } else {
+                    eprintln!("Public user table sync skipped: set CAESIM_SUPABASE_SERVICE_ROLE_KEY to create/update the table row.");
+                }
+                Ok(())
+            }
+            Err(err) => Err(anyhow!(
+                "login failed: {}\nIf this is a new account, run `caesim signup --email <email>`.\nIf you already have an OTP-based account, run `caesim login --otp --email <email>`.",
+                err
+            )),
+        }
     })
 }
 
@@ -291,7 +352,7 @@ fn run_whoami() -> Result<()> {
         let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
-        let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await;
+        let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await;
 
         match me {
             Ok(profile) => {
@@ -345,7 +406,7 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
 
-        let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
+        let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
 
         if !profile.has_password {
             eprintln!("No password is currently set. Setting a new password...");
@@ -354,7 +415,7 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
             if new_password != confirm_password {
                 return Err(anyhow!("password confirmation does not match"));
             }
-            auth::set_password(&supabase_url, &supabase_key, &session.session_token, &new_password).await?;
+            auth::set_password(&supabase_url, &supabase_key, &session.user_id, &session.session_token, &new_password).await?;
             eprintln!("Password set successfully.");
             return Ok(());
         }
@@ -369,6 +430,7 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
         auth::change_password(
             &supabase_url,
             &supabase_key,
+            &session.user_id,
             &session.session_token,
             &current_password,
             &new_password,
@@ -389,14 +451,14 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
 
         match args.command {
             Some(CreditsCommand::Balance) | None => {
-                let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
+                let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
                 eprintln!("Credit balance: {} credits", me.credit_balance);
                 Ok(())
             }
             Some(CreditsCommand::Add { amount }) => {
-                auth::add_credits(&supabase_url, &supabase_key, &session.session_token, amount).await?;
+                auth::add_credits(&supabase_url, &supabase_key, &session.user_id, &session.session_token, amount).await?;
                 eprintln!("Added {} credits.", amount);
-                let me = auth::fetch_me(&supabase_url, &supabase_key, &session.session_token).await?;
+                let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
                 eprintln!("New balance: {} credits", me.credit_balance);
                 Ok(())
             }
@@ -549,6 +611,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
     let mut vision_credit_runtime = None;
     let mut vision_credit_supabase_url = None;
     let mut vision_credit_supabase_key = None;
+    let mut vision_credit_user_id = None;
     let mut vision_credit_session_token = None;
 
     if args.vision {
@@ -556,7 +619,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         let session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
-        let me = runtime.block_on(auth::fetch_me(&supabase_url, &supabase_key, &session.session_token))?;
+        let me = runtime.block_on(auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token))?;
         let cost = estimate_vision_credit_cost(images.len());
 
         if me.credit_balance < cost {
@@ -573,6 +636,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         vision_credit_runtime = Some(runtime);
         vision_credit_supabase_url = Some(supabase_url);
         vision_credit_supabase_key = Some(supabase_key);
+        vision_credit_user_id = Some(session.user_id);
         vision_credit_session_token = Some(session.session_token);
     }
 
@@ -595,16 +659,18 @@ fn run_cut(args: CutArgs) -> Result<()> {
         None
     };
 
-    if let (Some(runtime), Some(supabase_url), Some(supabase_key), Some(session_token), Some(cost)) = (
+    if let (Some(runtime), Some(supabase_url), Some(supabase_key), Some(user_id), Some(session_token), Some(cost)) = (
         vision_credit_runtime.as_ref(),
         vision_credit_supabase_url.as_ref(),
         vision_credit_supabase_key.as_ref(),
+        vision_credit_user_id.as_ref(),
         vision_credit_session_token.as_ref(),
         vision_credit_cost,
     ) {
         let new_balance = runtime.block_on(auth::consume_credits(
             supabase_url,
             supabase_key,
+            user_id,
             session_token,
             cost,
         ))?;

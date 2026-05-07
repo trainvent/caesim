@@ -562,6 +562,9 @@ async fn update_supabase_password(state: &AppState, token: &str, new_password: &
     let url = format!("{}/auth/v1/user", state.supabase_url);
     let body = serde_json::json!({
         "password": new_password,
+        "data": {
+            "has_password": true
+        },
         "user_metadata": {
             "has_password": true
         }

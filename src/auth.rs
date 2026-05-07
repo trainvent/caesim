@@ -65,6 +65,13 @@ pub fn default_supabase_anon_key() -> Result<String> {
         .context("CAESIM_SUPABASE_ANON_KEY, SUPABASE_ANON_KEY, or SUPABASE_KEY environment variable not set")
 }
 
+pub fn default_supabase_service_role_key() -> Option<String> {
+    env::var("CAESIM_SUPABASE_SERVICE_ROLE_KEY")
+        .or_else(|_| env::var("SUPABASE_SERVICE_ROLE_KEY"))
+        .or_else(|_| env::var("SUPABASE_SERVICE_KEY"))
+        .ok()
+}
+
 pub fn session_path() -> Result<PathBuf> {
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(xdg).join("caesim/session.json"));
@@ -191,6 +198,15 @@ pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, pa
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();
     if !status.is_success() {
+        // Try to extract error details from Supabase response
+        if let Ok(err_json) = serde_json::from_str::<Value>(&body) {
+            if let Some(error_desc) = err_json.get("error_description").and_then(|v| v.as_str()) {
+                return Err(anyhow!("{}", error_desc));
+            }
+            if let Some(error_code) = err_json.get("error").and_then(|v| v.as_str()) {
+                return Err(anyhow!("Supabase error: {}", error_code));
+            }
+        }
         return Err(anyhow!("password login failed with {}: {}", status, body));
     }
 
@@ -223,16 +239,69 @@ pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, pa
     })
 }
 
-pub async fn set_password(base_url: &str, anon_key: &str, session_token: &str, new_password: &str) -> Result<()> {
+pub async fn set_password(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, new_password: &str) -> Result<()> {
     validate_password(new_password)?;
     let mut patch = Map::new();
     patch.insert("has_password".to_string(), Value::Bool(true));
-    update_supabase_user(base_url, anon_key, session_token, Some(new_password), patch).await
+    update_supabase_user(base_url, anon_key, Some(user_id), session_token, Some(new_password), patch).await
 }
 
-pub async fn change_password(base_url: &str, anon_key: &str, session_token: &str, current_password: &str, new_password: &str) -> Result<()> {
+pub async fn sync_public_user_row(
+    base_url: &str,
+    user_id: &str,
+    email: &str,
+    credit_balance: i64,
+) -> Result<()> {
+    let service_role_key = default_supabase_service_role_key()
+        .ok_or_else(|| anyhow!("CAESIM_SUPABASE_SERVICE_ROLE_KEY, SUPABASE_SERVICE_ROLE_KEY, or SUPABASE_SERVICE_KEY environment variable not set"))?;
+
+    let now = unix_ts();
+    let existing = fetch_public_user_row(base_url, &service_role_key, user_id).await?;
+    let created_at = existing
+        .as_ref()
+        .and_then(|row| row.get("created_at"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(now);
+
+    let body = serde_json::json!({
+        "id": user_id,
+        "email": email.trim().to_ascii_lowercase(),
+        "auth_provider": existing
+            .as_ref()
+            .and_then(|row| row.get("auth_provider"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("email"),
+        "plan": existing
+            .as_ref()
+            .and_then(|row| row.get("plan"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("beta"),
+        "created_at": created_at,
+        "last_seen_at": now,
+        "pending_code": existing
+            .as_ref()
+            .and_then(|row| row.get("pending_code"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "code_expires_at": existing
+            .as_ref()
+            .and_then(|row| row.get("code_expires_at"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "account_status": existing
+            .as_ref()
+            .and_then(|row| row.get("account_status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("active"),
+        "credit_balance": credit_balance,
+    });
+
+    upsert_public_user_row(base_url, &service_role_key, body).await
+}
+
+pub async fn change_password(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, current_password: &str, new_password: &str) -> Result<()> {
     validate_password(new_password)?;
-    let user = fetch_supabase_user(base_url, anon_key, session_token).await?;
+    let user = fetch_supabase_user(base_url, anon_key, Some(user_id), session_token).await?;
 
     let verify_url = format!("{}/auth/v1/token?grant_type=password", normalize_base_url(base_url));
     let verify_body = serde_json::json!({
@@ -264,39 +333,56 @@ pub async fn change_password_with_otp(base_url: &str, anon_key: &str, email: &st
     update_supabase_password(base_url, anon_key, &token, new_password).await
 }
 
-pub async fn fetch_me(base_url: &str, anon_key: &str, session_token: &str) -> Result<MeResponse> {
-    let json = fetch_supabase_user_raw(base_url, anon_key, session_token).await?;
+pub async fn fetch_me(base_url: &str, anon_key: &str, user_id: &str, session_token: &str) -> Result<MeResponse> {
+    let auth_json = fetch_supabase_user_raw(base_url, anon_key, Some(user_id), session_token).await?;
+    let table_row = if let Some(service_role_key) = default_supabase_service_role_key() {
+        fetch_public_user_row(base_url, &service_role_key, user_id).await?
+    } else {
+        None
+    };
 
-    let user_id = json
+    let user_id = auth_json
         .get("id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("user has no id"))?
         .to_string();
-    let email = json
-        .get("email")
+    let email = table_row
+        .as_ref()
+        .and_then(|row| row.get("email"))
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("user has no email"))?
-        .to_string();
+        .map(str::to_string)
+        .or_else(|| auth_json.get("email").and_then(|v| v.as_str()).map(str::to_string))
+        .ok_or_else(|| anyhow!("user has no email"))?;
 
-    let has_password = extract_boolean_metadata(&json, "has_password");
-    let credit_balance = extract_integer_metadata(&json, "credit_balance").unwrap_or(0);
+    let has_password = extract_boolean_metadata(&auth_json, "has_password");
+    let credit_balance = table_row
+        .as_ref()
+        .and_then(|row| row.get("credit_balance"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| extract_integer_metadata(&auth_json, "credit_balance").unwrap_or(0));
+    let account_status = table_row
+        .as_ref()
+        .and_then(|row| row.get("account_status"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("active")
+        .to_string();
 
     Ok(MeResponse {
         user_id,
         email,
-        account_status: "active".to_string(),
+        account_status,
         credit_balance,
         has_password,
         expires_at: unix_ts() + 30 * 24 * 60 * 60,
     })
 }
 
-pub async fn add_credits(base_url: &str, anon_key: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
+pub async fn add_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
     if amount_credits <= 0 {
         return Err(anyhow!("amount must be greater than 0"));
     }
 
-    let me = fetch_me(base_url, anon_key, session_token).await?;
+    let me = fetch_me(base_url, anon_key, user_id, session_token).await?;
     if !is_test_credit_account(&me.email) {
         return Err(anyhow!(
             "credit top-ups are only enabled for basic@trainvent.com during testing"
@@ -305,22 +391,22 @@ pub async fn add_credits(base_url: &str, anon_key: &str, session_token: &str, am
 
     let current = me.credit_balance;
     let new_balance = current.saturating_add(amount_credits);
-    set_credit_balance(base_url, anon_key, session_token, new_balance).await?;
+    set_credit_balance(base_url, anon_key, user_id, session_token, new_balance).await?;
     Ok(new_balance)
 }
 
-pub async fn consume_credits(base_url: &str, anon_key: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
+pub async fn consume_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
     if amount_credits <= 0 {
         return Err(anyhow!("amount must be greater than 0"));
     }
 
-    let current = fetch_me(base_url, anon_key, session_token).await?.credit_balance;
+    let current = fetch_me(base_url, anon_key, user_id, session_token).await?.credit_balance;
     if current < amount_credits {
         return Err(anyhow!("insufficient credits: have {current}, need {amount_credits}"));
     }
 
     let new_balance = current - amount_credits;
-    set_credit_balance(base_url, anon_key, session_token, new_balance).await?;
+    set_credit_balance(base_url, anon_key, user_id, session_token, new_balance).await?;
     Ok(new_balance)
 }
 
@@ -339,7 +425,25 @@ fn validate_password(password: &str) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_supabase_user_raw(base_url: &str, anon_key: &str, session_token: &str) -> Result<Value> {
+async fn fetch_supabase_user_raw(base_url: &str, anon_key: &str, user_id: Option<&str>, session_token: &str) -> Result<Value> {
+    if let (Some(service_role_key), Some(user_id)) = (default_supabase_service_role_key(), user_id) {
+        let url = format!("{}/auth/v1/admin/users/{}", normalize_base_url(base_url), user_id);
+        let response = Client::new()
+            .get(&url)
+            .header("apikey", &service_role_key)
+            .header("Authorization", format!("Bearer {service_role_key}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to get admin user info at {url}"))?;
+
+        if response.status().is_success() {
+            return response
+                .json()
+                .await
+                .context("failed to parse Supabase admin user response");
+        }
+    }
+
     let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
     let response = Client::new()
         .get(&url)
@@ -359,8 +463,8 @@ async fn fetch_supabase_user_raw(base_url: &str, anon_key: &str, session_token: 
         .context("failed to parse Supabase user response")
 }
 
-async fn fetch_supabase_user(base_url: &str, anon_key: &str, session_token: &str) -> Result<CurrentUser> {
-    let json = fetch_supabase_user_raw(base_url, anon_key, session_token).await?;
+async fn fetch_supabase_user(base_url: &str, anon_key: &str, user_id: Option<&str>, session_token: &str) -> Result<CurrentUser> {
+    let json = fetch_supabase_user_raw(base_url, anon_key, user_id, session_token).await?;
     let email = json
         .get("email")
         .and_then(|v| v.as_str())
@@ -410,40 +514,64 @@ fn extract_access_token(json: &Value) -> Result<String> {
         .ok_or_else(|| anyhow!("Supabase response did not include an access token"))
 }
 
-async fn set_credit_balance(base_url: &str, anon_key: &str, session_token: &str, credit_balance: i64) -> Result<()> {
-    let mut patch = Map::new();
-    patch.insert("credit_balance".to_string(), Value::from(credit_balance));
-    update_supabase_user(base_url, anon_key, session_token, None, patch).await
+async fn set_credit_balance(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, credit_balance: i64) -> Result<()> {
+    if default_supabase_service_role_key().is_some() {
+        let auth_json = fetch_supabase_user_raw(base_url, anon_key, Some(user_id), session_token).await?;
+        let email = auth_json
+            .get("email")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("user has no email"))?;
+        sync_public_user_row(base_url, user_id, email, credit_balance).await
+    } else {
+        let mut patch = Map::new();
+        patch.insert("credit_balance".to_string(), Value::from(credit_balance));
+        update_supabase_user(base_url, anon_key, Some(user_id), session_token, None, patch).await
+    }
 }
 
 async fn update_supabase_password(base_url: &str, anon_key: &str, session_token: &str, new_password: &str) -> Result<()> {
     let mut patch = Map::new();
     patch.insert("has_password".to_string(), Value::Bool(true));
-    update_supabase_user(base_url, anon_key, session_token, Some(new_password), patch).await
+    update_supabase_user(base_url, anon_key, None, session_token, Some(new_password), patch).await
 }
 
-async fn update_supabase_user(base_url: &str, anon_key: &str, session_token: &str, new_password: Option<&str>, metadata_patch: Map<String, Value>) -> Result<()> {
-    let mut metadata = fetch_supabase_user_metadata(base_url, anon_key, session_token).await?;
+async fn update_supabase_user(base_url: &str, anon_key: &str, user_id: Option<&str>, session_token: &str, new_password: Option<&str>, metadata_patch: Map<String, Value>) -> Result<()> {
+    let mut metadata = fetch_supabase_user_metadata(base_url, anon_key, user_id, session_token).await?;
     for (key, value) in metadata_patch {
         metadata.insert(key, value);
     }
 
-    let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
     let mut body = Map::new();
     if let Some(new_password) = new_password {
         body.insert("password".to_string(), Value::String(new_password.to_string()));
     }
-    body.insert("user_metadata".to_string(), Value::Object(metadata));
+    body.insert("data".to_string(), Value::Object(metadata.clone()));
+    body.insert("user_metadata".to_string(), Value::Object(metadata.clone()));
 
-    let response = Client::new()
-        .put(&url)
-        .header("apikey", anon_key)
-        .header("Authorization", format!("Bearer {session_token}"))
-        .header("Content-Type", "application/json")
-        .json(&Value::Object(body))
-        .send()
-        .await
-        .with_context(|| format!("failed to update user profile at {url}"))?;
+    let client = Client::new();
+    let response = if let (Some(service_role_key), Some(user_id)) = (default_supabase_service_role_key(), user_id) {
+        let url = format!("{}/auth/v1/admin/users/{}", normalize_base_url(base_url), user_id);
+        client
+            .put(&url)
+            .header("apikey", &service_role_key)
+            .header("Authorization", format!("Bearer {service_role_key}"))
+            .header("Content-Type", "application/json")
+            .json(&Value::Object(body))
+            .send()
+            .await
+            .with_context(|| format!("failed to update admin user profile at {url}"))?
+    } else {
+        let url = format!("{}/auth/v1/user", normalize_base_url(base_url));
+        client
+            .put(&url)
+            .header("apikey", anon_key)
+            .header("Authorization", format!("Bearer {session_token}"))
+            .header("Content-Type", "application/json")
+            .json(&Value::Object(body))
+            .send()
+            .await
+            .with_context(|| format!("failed to update user profile at {url}"))?
+    };
 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
@@ -453,8 +581,52 @@ async fn update_supabase_user(base_url: &str, anon_key: &str, session_token: &st
     Ok(())
 }
 
-async fn fetch_supabase_user_metadata(base_url: &str, anon_key: &str, session_token: &str) -> Result<Map<String, Value>> {
-    let json = fetch_supabase_user_raw(base_url, anon_key, session_token).await?;
+async fn fetch_public_user_row(base_url: &str, service_role_key: &str, user_id: &str) -> Result<Option<Value>> {
+    let url = format!("{}/rest/v1/users?select=*&id=eq.{}&limit=1", normalize_base_url(base_url), user_id);
+    let response = Client::new()
+        .get(&url)
+        .header("apikey", service_role_key)
+        .header("Authorization", format!("Bearer {service_role_key}"))
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch public user row at {url}"))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("failed to fetch public user row: {}", error_text));
+    }
+
+    let rows: Vec<Value> = response
+        .json()
+        .await
+        .context("failed to parse public user row response")?;
+
+    Ok(rows.into_iter().next())
+}
+
+async fn upsert_public_user_row(base_url: &str, service_role_key: &str, row: Value) -> Result<()> {
+    let url = format!("{}/rest/v1/users?on_conflict=id", normalize_base_url(base_url));
+    let response = Client::new()
+        .post(&url)
+        .header("apikey", service_role_key)
+        .header("Authorization", format!("Bearer {service_role_key}"))
+        .header("Content-Type", "application/json")
+        .header("Prefer", "resolution=merge-duplicates,return=representation")
+        .json(&row)
+        .send()
+        .await
+        .with_context(|| format!("failed to upsert public user row at {url}"))?;
+
+    if !response.status().is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(anyhow!("failed to upsert public user row: {}", error_text));
+    }
+
+    Ok(())
+}
+
+async fn fetch_supabase_user_metadata(base_url: &str, anon_key: &str, user_id: Option<&str>, session_token: &str) -> Result<Map<String, Value>> {
+    let json = fetch_supabase_user_raw(base_url, anon_key, user_id, session_token).await?;
     Ok(json
         .get("user_metadata")
         .or_else(|| json.get("raw_user_meta_data"))

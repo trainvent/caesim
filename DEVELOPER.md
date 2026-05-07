@@ -171,4 +171,4 @@ Also write a compact mapping file for easy rollback:
 Reference used: `https://caesim.com/` (accessed April 23, 2026). The page explicitly presents Caesim as an image-library trimming concept and states “Not a product.”
 
 ## 11. Sources
-https://docs.rs/supabase-lib-rs/
+Use this unofficial rust guide for supabase-config: https://docs.rs/supabase-lib-rs/

@@ -152,14 +152,25 @@ For account setup and session reuse with Supabase Auth:
 ```bash
 export CAESIM_SUPABASE_URL="https://<project-ref>.supabase.co"
 export CAESIM_SUPABASE_ANON_KEY="<anon-key>"
+export CAESIM_SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 ```
+
+The service-role key is required if you want Caesim to create and keep the public
+`users` table row in sync for credit balance checks. Keep it on a trusted machine
+only.
 
 Then run:
 
 ```bash
+caesim signup
 caesim login
+caesim login --otp
 caesim whoami
 ```
+
+Use `caesim signup` for first-time account creation, `caesim login` for password sign-in, and `caesim login --otp` if you already have an OTP-based account.
+
+If you want Supabase's built-in signup flow to show a code instead of a browser confirmation link, edit the `auth.email.template.confirmation` email template and use `{{ .Token }}` in the email body. The default `{{ .ConfirmationURL }}` template renders a link, which is why you saw the redirect URL.
 
 You can customize the assistant's system prompt by setting `BACKBOARD_PROMPT` in your `.env`. Example:
 
