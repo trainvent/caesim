@@ -39,6 +39,12 @@ enum Commands {
     Login(LoginArgs),
     /// Show the active local account session
     Whoami,
+    /// Change account password
+    ChangePassword(ChangePasswordArgs),
+    /// Sign out and delete local session
+    Logout,
+    /// Manage account credits
+    Credits(CreditsArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -93,9 +99,39 @@ struct LoginArgs {
     #[arg(long)]
     email: Option<String>,
 
-    /// Verification code returned by the backend
+    /// Use OTP login flow instead of password login
+    #[arg(long)]
+    otp: bool,
+
+    /// Verification code from the email sent by Supabase
     #[arg(long = "verification-code")]
     verification_code: Option<String>,
+}
+
+#[derive(Parser, Debug)]
+struct ChangePasswordArgs {
+    /// Use OTP reset flow instead of current-password flow
+    #[arg(long)]
+    otp: bool,
+}
+
+#[derive(Parser, Debug)]
+struct CreditsArgs {
+    /// Check current credit balance
+    #[command(subcommand)]
+    command: Option<CreditsCommand>,
+}
+
+#[derive(Subcommand, Debug)]
+enum CreditsCommand {
+    /// Show current credit balance
+    Balance,
+    /// Add credits to account (in dollars)
+    Add {
+        /// Amount in dollars (e.g., 10.00)
+        #[arg(long)]
+        amount: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -167,6 +203,9 @@ fn main() -> Result<()> {
         Some(Commands::Vision(args)) => run_vision(args),
         Some(Commands::Login(args)) => run_login(args),
         Some(Commands::Whoami) => run_whoami(),
+        Some(Commands::ChangePassword(args)) => run_change_password(args),
+        Some(Commands::Logout) => run_logout(),
+        Some(Commands::Credits(args)) => run_credits(args),
         None => Err(anyhow!("no command provided")),
     }
 }
@@ -182,30 +221,91 @@ fn run_login(args: LoginArgs) -> Result<()> {
             None => prompt_line("Email address: ")?,
         };
 
-        let code = if let Some(code) = args.verification_code {
-            code
+        if args.otp {
+            let code = if let Some(code) = args.verification_code {
+                code
+            } else {
+                let login = auth::start_login(&backend_base, &email).await?;
+                eprintln!("{}", login.message);
+                prompt_line("Verification code: ")?
+            };
+
+            let session = auth::verify_login(&backend_base, &email, &code).await?;
+            auth::save_session(&auth::StoredSession {
+                backend_base_url: backend_base.clone(),
+                user_id: session.user_id.clone(),
+                email: session.email.clone(),
+                session_token: session.session_token.clone(),
+                expires_at: session.expires_at,
+                saved_at: current_unix_ts(),
+            })?;
+
+            eprintln!("Signed in as {} ({})", session.email, session.user_id);
+            eprintln!("Session saved locally.");
+
+            let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
+            if set_now.trim().is_empty() || matches!(set_now.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                let new_password = prompt_password("New password: ")?;
+                let confirm_password = prompt_password("Confirm password: ")?;
+                if new_password != confirm_password {
+                    return Err(anyhow!("password confirmation does not match"));
+                }
+                auth::set_password(&backend_base, &session.session_token, &new_password).await?;
+                eprintln!("Password set successfully.");
+            }
         } else {
-            let login = auth::start_login(&backend_base, &email).await?;
-            eprintln!("Verification code sent to {}.", login.email);
-            eprintln!("User ID: {}", login.user_id);
-            eprintln!("For the prototype, use this code:");
-            eprintln!("  {}", login.verification_code);
-            eprintln!("This code expires at {}.", login.expires_at);
-            prompt_line("Verification code: ")?
-        };
+            // Auto-detect: check if user exists
+            let user_exists = auth::check_user_exists(&backend_base, &email).await.unwrap_or(false);
 
-        let session = auth::verify_login(&backend_base, &email, &code).await?;
-        auth::save_session(&auth::StoredSession {
-            backend_base_url: backend_base,
-            user_id: session.user_id.clone(),
-            email: session.email.clone(),
-            session_token: session.session_token.clone(),
-            expires_at: session.expires_at,
-            saved_at: current_unix_ts(),
-        })?;
+            if user_exists {
+                // Existing user: password login
+                let password = prompt_password("Password: ")?;
+                let session = auth::login_with_password(&backend_base, &email, &password).await?;
+                auth::save_session(&auth::StoredSession {
+                    backend_base_url: backend_base,
+                    user_id: session.user_id.clone(),
+                    email: session.email.clone(),
+                    session_token: session.session_token.clone(),
+                    expires_at: session.expires_at,
+                    saved_at: current_unix_ts(),
+                })?;
 
-        eprintln!("Signed in as {} ({})", session.email, session.user_id);
-        eprintln!("Session saved locally.");
+                eprintln!("Signed in as {} ({})", session.email, session.user_id);
+                eprintln!("Session saved locally.");
+            } else {
+                // New user: register with OTP + password
+                eprintln!("This email is not yet registered. Registering new account...\n");
+                let code = if let Some(code) = args.verification_code {
+                    code
+                } else {
+                    let login = auth::start_login(&backend_base, &email).await?;
+                    eprintln!("{}", login.message);
+                    prompt_line("Verification code: ")?
+                };
+
+                let session = auth::verify_login(&backend_base, &email, &code).await?;
+                auth::save_session(&auth::StoredSession {
+                    backend_base_url: backend_base.clone(),
+                    user_id: session.user_id.clone(),
+                    email: session.email.clone(),
+                    session_token: session.session_token.clone(),
+                    expires_at: session.expires_at,
+                    saved_at: current_unix_ts(),
+                })?;
+
+                eprintln!("Account created! Signed in as {} ({})", session.email, session.user_id);
+                eprintln!("Session saved locally.");
+
+                // Require password for new accounts
+                let new_password = prompt_password("Set password: ")?;
+                let confirm_password = prompt_password("Confirm password: ")?;
+                if new_password != confirm_password {
+                    return Err(anyhow!("password confirmation does not match"));
+                }
+                auth::set_password(&backend_base, &session.session_token, &new_password).await?;
+                eprintln!("Password set successfully.");
+            }
+        }
         Ok(())
     })
 }
@@ -239,6 +339,98 @@ fn run_whoami() -> Result<()> {
     })
 }
 
+fn run_logout() -> Result<()> {
+    auth::clear_session()?;
+    eprintln!("Signed out successfully. Session deleted.");
+    Ok(())
+}
+
+fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
+    let runtime = Runtime::new().context("failed to create async runtime")?;
+    runtime.block_on(async move {
+        let backend_base = auth::default_backend_base_url();
+
+        if args.otp {
+            let email = prompt_line("Email address: ")?;
+            let login = auth::start_login(&backend_base, &email).await?;
+            eprintln!("{}", login.message);
+            let code = prompt_line("Verification code: ")?;
+            let new_password = prompt_password("New password: ")?;
+            let confirm_password = prompt_password("Confirm password: ")?;
+            if new_password != confirm_password {
+                return Err(anyhow!("password confirmation does not match"));
+            }
+
+            auth::change_password_with_otp(&backend_base, &email, &code, &new_password).await?;
+            eprintln!("Password changed successfully via OTP.");
+            return Ok(());
+        }
+
+        let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let backend_base = std::env::var("CAESIM_BACKEND_URL")
+            .ok()
+            .unwrap_or_else(|| session.backend_base_url.clone());
+
+        let profile = auth::fetch_me(&backend_base, &session.session_token).await?;
+
+        if !profile.has_password {
+            eprintln!("No password is currently set. Setting a new password...");
+            let new_password = prompt_password("New password: ")?;
+            let confirm_password = prompt_password("Confirm password: ")?;
+            if new_password != confirm_password {
+                return Err(anyhow!("password confirmation does not match"));
+            }
+            auth::set_password(&backend_base, &session.session_token, &new_password).await?;
+            eprintln!("Password set successfully.");
+            return Ok(());
+        }
+
+        let current_password = prompt_password("Current password: ")?;
+        let new_password = prompt_password("New password: ")?;
+        let confirm_password = prompt_password("Confirm password: ")?;
+        if new_password != confirm_password {
+            return Err(anyhow!("password confirmation does not match"));
+        }
+
+        auth::change_password(
+            &backend_base,
+            &session.session_token,
+            &current_password,
+            &new_password,
+        )
+        .await?;
+
+        eprintln!("Password changed successfully.");
+        Ok(())
+    })
+}
+
+fn run_credits(args: CreditsArgs) -> Result<()> {
+    let runtime = Runtime::new().context("failed to create async runtime")?;
+    runtime.block_on(async move {
+        let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let backend_base = std::env::var("CAESIM_BACKEND_URL")
+            .ok()
+            .unwrap_or_else(|| session.backend_base_url.clone());
+
+        match args.command {
+            Some(CreditsCommand::Balance) | None => {
+                let me = auth::fetch_me(&backend_base, &session.session_token).await?;
+                eprintln!("Credit balance: ${:.2}", me.credit_balance as f64 / 100.0);
+                Ok(())
+            }
+            Some(CreditsCommand::Add { amount }) => {
+                let cents = (amount.parse::<f64>()? * 100.0) as i64;
+                auth::add_credits(&backend_base, &session.session_token, cents).await?;
+                eprintln!("Added ${} to your account.", amount);
+                let me = auth::fetch_me(&backend_base, &session.session_token).await?;
+                eprintln!("New balance: ${:.2}", me.credit_balance as f64 / 100.0);
+                Ok(())
+            }
+        }
+    })
+}
+
 fn prompt_line(prompt: &str) -> Result<String> {
     eprint!("{}", prompt);
     io::stderr().flush()?;
@@ -249,6 +441,34 @@ fn prompt_line(prompt: &str) -> Result<String> {
         return Err(anyhow!("no input provided"));
     }
     Ok(input)
+}
+
+fn prompt_line_allow_empty(prompt: &str) -> Result<String> {
+    eprint!("{}", prompt);
+    io::stderr().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn prompt_password(prompt: &str) -> Result<String> {
+    loop {
+        eprint!("{}", prompt);
+        io::stderr().flush()?;
+        let value = match rpassword::read_password() {
+            Ok(pwd) => pwd,
+            Err(_) => {
+                // Fallback to regular input if rpassword fails
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                input.trim().to_string()
+            }
+        };
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+        eprintln!("Password cannot be empty. Please try again.");
+    }
 }
 
 fn current_unix_ts() -> i64 {

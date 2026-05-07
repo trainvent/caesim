@@ -18,3 +18,4 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 rustix = "0.38"
 dotenvy = "0.15"
+rpassword = "7"

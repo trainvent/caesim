@@ -1,0 +1,8 @@
+{
+	"chat.tools.terminal.autoApprove": {
+		"cargo build": true,
+		"cargo install": true,
+		"caesim": true,
+		"true": true
+	}
+}
