@@ -258,56 +258,27 @@ fn run_login(args: LoginArgs) -> Result<()> {
                 eprintln!("Password set successfully.");
             }
         } else {
-            // Auto-detect: check if user exists
-            let user_exists = auth::check_user_exists(&supabase_url, &supabase_key, &email).await.unwrap_or(false);
+            let password = prompt_password("Password: ")?;
+            match auth::login_with_password(&supabase_url, &supabase_key, &email, &password).await {
+                Ok(session) => {
+                    auth::save_session(&auth::StoredSession {
+                        supabase_url: supabase_url.clone(),
+                        user_id: session.user_id.clone(),
+                        email: session.email.clone(),
+                        session_token: session.session_token.clone(),
+                        expires_at: session.expires_at,
+                        saved_at: current_unix_ts(),
+                    })?;
 
-            if user_exists {
-                // Existing user: password login
-                let password = prompt_password("Password: ")?;
-                let session = auth::login_with_password(&supabase_url, &supabase_key, &email, &password).await?;
-                auth::save_session(&auth::StoredSession {
-                    supabase_url: supabase_url.clone(),
-                    user_id: session.user_id.clone(),
-                    email: session.email.clone(),
-                    session_token: session.session_token.clone(),
-                    expires_at: session.expires_at,
-                    saved_at: current_unix_ts(),
-                })?;
-
-                eprintln!("Signed in as {} ({})", session.email, session.user_id);
-                eprintln!("Session saved locally.");
-            } else {
-                // New user: register with OTP + password
-                eprintln!("This email is not yet registered. Registering new account...\n");
-                let code = if let Some(code) = args.verification_code {
-                    code
-                } else {
-                    let login = auth::start_login(&supabase_url, &supabase_key, &email).await?;
-                    eprintln!("{}", login.message);
-                    prompt_line("Verification code: ")?
-                };
-
-                let session = auth::verify_login(&supabase_url, &supabase_key, &email, &code).await?;
-                auth::save_session(&auth::StoredSession {
-                    supabase_url: supabase_url.clone(),
-                    user_id: session.user_id.clone(),
-                    email: session.email.clone(),
-                    session_token: session.session_token.clone(),
-                    expires_at: session.expires_at,
-                    saved_at: current_unix_ts(),
-                })?;
-
-                eprintln!("Account created! Signed in as {} ({})", session.email, session.user_id);
-                eprintln!("Session saved locally.");
-
-                // Require password for new accounts
-                let new_password = prompt_password("Set password: ")?;
-                let confirm_password = prompt_password("Confirm password: ")?;
-                if new_password != confirm_password {
-                    return Err(anyhow!("password confirmation does not match"));
+                    eprintln!("Signed in as {} ({})", session.email, session.user_id);
+                    eprintln!("Session saved locally.");
                 }
-                auth::set_password(&supabase_url, &supabase_key, &session.session_token, &new_password).await?;
-                eprintln!("Password set successfully.");
+                Err(err) => {
+                    return Err(anyhow!(
+                        "password login failed without sending OTP; use --otp to create a new account or reset access. Details: {}",
+                        err
+                    ));
+                }
             }
         }
         Ok(())

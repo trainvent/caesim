@@ -65,30 +65,6 @@ pub fn default_supabase_anon_key() -> Result<String> {
         .context("CAESIM_SUPABASE_ANON_KEY, SUPABASE_ANON_KEY, or SUPABASE_KEY environment variable not set")
 }
 
-pub async fn check_user_exists(base_url: &str, anon_key: &str, email: &str) -> Result<bool> {
-    let url = format!("{}/auth/v1/otp", normalize_base_url(base_url));
-    let client = Client::new();
-    let resp = client
-        .post(&url)
-        .header("apikey", anon_key)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "email": email.trim().to_string(),
-            "create_user": false,
-        }))
-        .send()
-        .await
-        .with_context(|| format!("failed to check user existence at {url}"))?;
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(anyhow!("user existence check failed with {}: {}", status, body));
-    }
-
-    Ok(true)
-}
-
 pub fn session_path() -> Result<PathBuf> {
     if let Ok(xdg) = env::var("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(xdg).join("caesim/session.json"));
