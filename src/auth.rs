@@ -320,7 +320,14 @@ pub async fn add_credits(base_url: &str, anon_key: &str, session_token: &str, am
         return Err(anyhow!("amount must be greater than 0"));
     }
 
-    let current = fetch_me(base_url, anon_key, session_token).await?.credit_balance;
+    let me = fetch_me(base_url, anon_key, session_token).await?;
+    if !is_test_credit_account(&me.email) {
+        return Err(anyhow!(
+            "credit top-ups are only enabled for basic@trainvent.com during testing"
+        ));
+    }
+
+    let current = me.credit_balance;
     let new_balance = current.saturating_add(amount_credits);
     set_credit_balance(base_url, anon_key, session_token, new_balance).await?;
     Ok(new_balance)
@@ -500,6 +507,10 @@ fn extract_integer_metadata(user_json: &Value, key: &str) -> Option<i64> {
                 .and_then(|meta| meta.get(key))
                 .and_then(|value| value.as_i64())
         })
+}
+
+fn is_test_credit_account(email: &str) -> bool {
+    email.trim().eq_ignore_ascii_case("basic@trainvent.com")
 }
 
 #[derive(Debug)]
