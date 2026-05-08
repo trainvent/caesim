@@ -123,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().init();
 
     let supabase_url = env::var("SUPABASE_URL").context("SUPABASE_URL environment variable not set")?;
-    let supabase_key = env::var("SUPABASE_KEY").context("SUPABASE_KEY environment variable not set")?;
+    let supabase_key = env::var("SUPABASE_SECRET_KEY").context("SUPABASE_SECRET_KEY environment variable not set")?;
 
     let state = AppState {
         supabase_url,
