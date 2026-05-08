@@ -14,7 +14,7 @@ sha2 = "0.10"
 hex = "0.4"
 thiserror = "2"
 image = "0.25"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "native-tls"] }
 tokio = { version = "1", features = ["full"] }
 rustix = "0.38"
 dotenvy = "0.15"

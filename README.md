@@ -1,193 +1,62 @@
 # Caesim
 
-Caesim is a small CLI-style concept for trimming large image libraries.
+Caesim is a local CLI utility for safely trimming large image libraries. Describe what to cut, and Caesim scans for matches and moves them into a review folder instead of deleting them.
 
-Default flow:
+## Quick Start
 
-1. You describe what you want to do in natural language to the AI assistant.
-2. Backboard turns that request into a valid `caesim` command.
-3. Caesim scans a folder and finds matches.
-4. Matches are moved into a separate `cut` folder for review, or to a custom folder with `--destination`.
-5. Nothing is hard-deleted by default.
+### Install
 
-This keeps cleanup fast while preserving a safety review step.
+```bash
+cargo install --path .
+```
 
-## Product Direction
+### Basic Usage
 
-The public site frames Caesim as:
+Move all screenshots to a `cut` folder for review:
 
-1. Local utility with a simple install/run flow
-2. “Cut folder” workflow instead of immediate deletion
-3. A concept page, not a production SaaS product
+```bash
+caesim cut ./my-photos --rule screenshots --dry-run
+```
 
-Example assistant-generated command concept:
+When ready (remove `--dry-run`):
 
 ```bash
 caesim cut ./my-photos --rule screenshots
 ```
 
-## MVP Scope
-
-1. CLI command: `caesim cut <path> --rule "<text>" [--destination <folder>]`
-2. File scanner (recursive image discovery for common raster formats plus SVG)
-3. Rule matcher (initially simple heuristics + tags)
-4. Move matched files into `<path>/cut/`
-5. Generate a run report:
-   - scanned count
-   - matched count
-   - moved file list
-6. Add `--dry-run` mode
-
-## Safety Rules
-
-1. Default action is move, not delete.
-2. Never overwrite existing files in `cut` (auto-rename collisions).
-3. Keep a manifest log to restore files if needed.
-
-## Status
-
-Early executable MVP. Build recipe is in [DEVELOPER.md](/home/leonmarq/Code/caesim/DEVELOPER.md).
-
-## Install / Run
-
-Build the local executable:
+Cut landscape photos into a custom folder:
 
 ```bash
-cargo build
+caesim cut ./my-photos --rule landscape --destination ./review
 ```
 
-Run it from the repo:
+### How It Works
+
+1. Run a simple command describing what you want to cut.
+2. Caesim scans your photo folder and finds matches.
+3. Matched images move into a `cut` folder for review.
+4. Nothing is hard-deleted—you can always restore from the report.
+5. Get a detailed log of what was moved and why.
+
+### Supported Rules
+
+- `screenshots`
+- `duplicates`
+- `blurry`
+- `dark` / `low-light`
+- `landscape` / `portrait`
+- And more—see [DEVELOPER.md](DEVELOPER.md) for the complete rule engine.
+
+### With AI Assistant
+
+Let an AI assistant help you write the command:
 
 ```bash
-cargo run -- cut ./my-photos --rule screenshots --dry-run
+caesim --ai-assist
 ```
 
-Cut landscape photos into a review folder:
+Just describe what you want to clean up, and Caesim generates the command for you.
 
-```bash
-cargo run -- cut ./my-photos --rule landscape --destination ./review --dry-run
-```
+## Development
 
-Cut portrait photos:
-
-```bash
-cargo run -- cut ./my-photos --rule portrait --dry-run
-```
-
-Send matches into a custom folder:
-
-```bash
-cargo run -- cut ./my-photos --rule screenshots --destination ./review --dry-run
-```
-
-Or install the `caesim` command from this checkout:
-
-```bash
-cargo install --path .
-caesim cut ./my-photos --rule screenshots --dry-run
-```
-
-Duplicate matching detects exact file-content duplicates and common exported-copy names such as `image (1).svg` when `image.svg` exists. With `--vision`, Caesim uses Google Cloud Vision signals for richer matching. `duplicates` asks for web matches, OCR, labels, and dominant colors; object matching now goes through a separate `--contains` flag.
-
-## Dev quickstart (Rust + optional Python Vision)
-
-### AI-first run
-
-Start the assistant and describe the cleanup you want:
-
-```bash
-cargo run -- --ai-assist
-```
-
-The assistant creates the `caesim` command for you, then asks before executing it.
-
-### Local-only run (manual command)
-
-```bash
-cargo run -- cut ./my-photos --rule screenshots --dry-run
-```
-
-### Google Cloud Vision (optional backend)
-
-This repo includes a small Python backend (`python/vision_backend.py`) that the Rust CLI can call via **Cloud Vision API**.
-
-- Install deps:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-- Configure Google credentials (recommended: Application Default Credentials) and enable the Vision API in your GCP project.
-- Run with Vision enabled:
-
-```bash
-cargo run -- cut ./my-photos --rule explicit --vision --dry-run
-```
-
-Use Vision-assisted duplicate detection:
-
-```bash
-cargo run -- cut ./my-photos --rule duplicates --vision --dry-run
-```
-
-Use Vision label detection for object-style filtering:
-
-```bash
-cargo run -- cut ./my-photos --contains cars --vision --dry-run
-```
-
-Backboard is the default command-creation layer:
-
-```bash
-cargo run -- --ai-assist
-```
-
-It asks for a natural-language request, sends it to Backboard, and shows a suggested `caesim` command before execution.
-Set `BACKBOARD_API_KEY_CAESIM` in your environment before using it.
-
-For account setup and session reuse with Supabase Auth:
-
-```bash
-export CAESIM_SUPABASE_URL="https://<project-ref>.supabase.co"
-export CAESIM_SUPABASE_ANON_KEY="<anon-key>"
-export CAESIM_SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
-```
-
-The service-role key is required if you want Caesim to create and keep the public
-`users` table row in sync for credit balance checks. Keep it on a trusted machine
-only.
-
-Then run:
-
-```bash
-caesim signup
-caesim login
-caesim login --otp
-caesim whoami
-```
-
-Use `caesim signup` for first-time account creation, `caesim login` for password sign-in, and `caesim login --otp` if you already have an OTP-based account.
-
-If you want Supabase's built-in signup flow to show a code instead of a browser confirmation link, edit the `auth.email.template.confirmation` email template and use `{{ .Token }}` in the email body. The default `{{ .ConfirmationURL }}` template renders a link, which is why you saw the redirect URL.
-
-You can customize the assistant's system prompt by setting `BACKBOARD_PROMPT` in your `.env`. Example:
-
-```bash
-# BACKBOARD_PROMPT="Translate user's request into a caesim command; return JSON with 'command' and 'explanation'"
-```
-
-Note: the first `cargo build` / `cargo run` needs access to `crates.io` to download Rust dependencies.
-
-## Source
-
-Based on `https://caesim.com/` content (accessed April 23, 2026).
-
-## Tools in use
-- Backboard.io for AI-assisted command creation
-- Google Vision for image recognition
-
-## Credits
-- Codex and Github CoPilot were used
-
+For architecture, CLI specification, rule engine details, build recipes, dev setup, and testing—see [DEVELOPER.md](DEVELOPER.md).

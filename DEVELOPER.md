@@ -11,6 +11,28 @@ Build a safe image-library trimming utility with:
 3. Reviewable output (`cut` folder + manifest/log)
 4. Direct Supabase Auth for account/session handling; no hosted Rust backend in the product path
 
+## 1.1 MVP Scope
+
+The MVP delivers:
+
+1. CLI command: `caesim cut <path> --rule "<text>" [--destination <folder>]`
+2. File scanner (recursive image discovery for common raster formats: `jpg`, `jpeg`, `png`, `webp`, `heic`, `tiff`, `gif`)
+3. Rule matcher (initially simple heuristics + tags)
+4. Move matched files into `<path>/cut/`
+5. Generate a run report:
+   - scanned count
+   - matched count
+   - moved file list
+6. Support `--dry-run` mode for safe preview
+
+## 1.2 Safety Requirements (MVP)
+
+1. **Default action is move, not delete.** Files are never permanently deleted.
+2. **Never overwrite existing files in `cut`.** Auto-rename collisions using suffixes (`_1`, `_2`, ...).
+3. **Keep a manifest log** to restore files if needed.
+4. **Skip moving files already inside `cut`** (scope guard to prevent recursion).
+5. **Abort cleanly with partial-run report** on failures.
+
 ## 2. CLI Specification (MVP)
 
 ## 2.1 Command
@@ -166,9 +188,113 @@ Also write a compact mapping file for easy rollback:
 4. `--dry-run` produces identical match list without moving files.
 5. Tests cover core safety behavior.
 
-## 10. Source Note
+## 11. Dev Quickstart (Rust + optional Python Vision)
 
-Reference used: `https://caesim.com/` (accessed April 23, 2026). The page explicitly presents Caesim as an image-library trimming concept and states “Not a product.”
+### Building from source
 
-## 11. Sources
-Use this unofficial rust guide for supabase-config: https://docs.rs/supabase-lib-rs/
+```bash
+cargo build
+```
+
+Run the compiled binary:
+
+```bash
+cargo run -- cut ./my-photos --rule screenshots --dry-run
+```
+
+Or install the CLI globally:
+
+```bash
+cargo install --path .
+caesim cut ./my-photos --rule screenshots --dry-run
+```
+
+### Local-only command (manual, deterministic)
+
+```bash
+cargo run -- cut ./my-photos --rule screenshots --dry-run
+```
+
+This runs without any AI assistance or Vision API—purely local heuristics.
+
+### Google Cloud Vision (optional backend)
+
+This repo includes a Python backend (`python/vision_backend.py`) that the Rust CLI can optionally call via the **Google Cloud Vision API** for richer image analysis.
+
+**Setup:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Configure Google credentials:**
+- Enable the Vision API in your GCP project.
+- Use Application Default Credentials (recommended) or set `GOOGLE_APPLICATION_CREDENTIALS`.
+
+**Run with Vision enabled:**
+
+```bash
+cargo run -- cut ./my-photos --rule explicit --vision --dry-run
+cargo run -- cut ./my-photos --rule duplicates --vision --dry-run
+cargo run -- cut ./my-photos --contains cars --vision --dry-run
+```
+
+### AI-assisted command creation (Backboard)
+
+Use **Backboard** to generate commands from natural language:
+
+```bash
+cargo run -- --ai-assist
+```
+
+Describe what you want to clean up (e.g., "remove all screenshots"), and Backboard will suggest a `caesim` command before execution.
+
+**Setup:**
+- Set `BACKBOARD_API_KEY_CAESIM` in your environment.
+
+**Custom prompt:**
+You can customize the AI behavior by setting `BACKBOARD_PROMPT` in your `.env`:
+
+```bash
+BACKBOARD_PROMPT="Translate user's request into a caesim command; return JSON with 'command' and 'explanation'"
+```
+
+### Supabase Auth (account & session management)
+
+Caesim uses **Supabase Auth** directly for account management and session handling—no custom backend required.
+
+**Setup:**
+
+```bash
+export CAESIM_SUPABASE_URL="https://<project-ref>.supabase.co"
+export CAESIM_SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+```
+
+The service-role key is only needed if you want Caesim to manage credit balances in a `users` table. Keep it on a trusted machine only.
+
+**Commands:**
+
+```bash
+caesim signup              # Create a new account
+caesim login               # Sign in with password
+caesim login --otp         # Sign in with one-time password
+caesim whoami              # Show current user session
+```
+
+**Email confirmation:**
+If you want Supabase to send a code instead of a browser link, edit the `auth.email.template.confirmation` email template and use `{{ .Token }}` in the body (instead of the default `{{ .ConfirmationURL }}`).
+
+### Dependencies
+
+The first `cargo build` / `cargo run` requires access to `crates.io` to download Rust dependencies. Ensure you have internet access and Cargo installed.
+
+## 12. Sources and Credits
+
+- **Concept reference**: `https://caesim.com/` (accessed April 23, 2026). The site frames Caesim as an image-library trimming concept and explicitly states "Not a product."
+- **Supabase Rust guide**: https://docs.rs/supabase-lib-rs/
+- **Tools in use**:
+  - Backboard.io for AI-assisted command creation
+  - Google Cloud Vision API for image recognition (optional)
+- **Credits**: Codex and GitHub Copilot were used in development
