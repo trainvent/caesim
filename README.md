@@ -55,6 +55,11 @@ Let an AI assistant help you write the command:
 caesim --ai-assist
 ```
 
+### Vision label search
+
+Use `--find <label>` to enable the optional Google Vision backend and search for image labels (for example: `--find cars`). Vision mode requires configuring the Python vision backend and valid Google credentials; see `DEVELOPER.md` for details.
+
+
 Just describe what you want to clean up, and Caesim generates the command for you.
 
 ## Development

@@ -59,8 +59,9 @@ struct CutArgs {
     cut_rule: Option<String>,
 
     /// Vision label query like "food" or "receipt"
-    #[arg(long = "contains")]
-    contains: Option<String>,
+    /// Use `--find cars` to enable vision mode and search for the label.
+    #[arg(long = "find", value_name = "LABEL")]
+    find: Option<String>,
 
     /// Folder to move matched files into (defaults to <path>/cut)
     #[arg(long = "destination")]
@@ -83,9 +84,7 @@ struct CutArgs {
     #[arg(long)]
     report: Option<PathBuf>,
 
-    /// Enable optional Python + Google Vision backend (post-run/advanced rules)
-    #[arg(long)]
-    vision: bool,
+
 }
 
 #[derive(Parser, Debug)]
@@ -155,7 +154,7 @@ struct RunReport {
     run_id: String,
     target_path: String,
     rule: Option<String>,
-    contains: Option<String>,
+    find: Option<String>,
     destination: Option<String>,
     dry_run: bool,
     scanned_count: usize,
@@ -561,7 +560,7 @@ fn run_vision(args: VisionArgs) -> Result<()> {
         eprintln!("To use custom credentials, set the environment variable:");
         eprintln!("  export GOOGLE_APPLICATION_CREDENTIALS=\"{}\"", custom_json.display());
         eprintln!();
-        eprintln!("Then run caesim commands with --vision flag.");
+        eprintln!("Then run caesim commands with --find flag.");
         return Ok(());
     }
 
@@ -574,8 +573,8 @@ fn run_vision(args: VisionArgs) -> Result<()> {
     eprintln!("  2. Save credentials to ~/.config/gcloud/application_default_credentials.json");
     eprintln!("  3. Allow caesim to access Google Cloud Vision API");
     eprintln!();
-    eprintln!("After setup, you can use caesim with --vision flag:");
-    eprintln!("  caesim cut <path> --rule duplicates --vision");
+    eprintln!("After setup, you can use caesim with --find flag:");
+    eprintln!("  caesim cut <path> --rule duplicates --find cars");
     eprintln!();
 
     Ok(())
@@ -602,7 +601,9 @@ fn run_cut(args: CutArgs) -> Result<()> {
     let image_paths: HashSet<PathBuf> = images.iter().cloned().collect();
 
     // complexity estimate (deterministic, no money)
-    let complexity = estimate_complexity(images.len(), args.vision);
+    let vision_enabled = args.find.is_some();
+    let vision_label = args.find.as_deref();
+    let complexity = estimate_complexity(images.len(), vision_enabled);
     eprintln!(
         "Complexity estimate: score={} tier={} ({} images)",
         complexity.score,
@@ -615,7 +616,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         .as_deref()
         .map(vision_features_for_rule)
         .unwrap_or_else(Vec::new);
-    if args.contains.is_some() && !vision_features.iter().any(|f| f == "LABEL_DETECTION") {
+    if vision_label.is_some() && !vision_features.iter().any(|f| f == "LABEL_DETECTION") {
         vision_features.push("LABEL_DETECTION".to_string());
     }
 
@@ -628,7 +629,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
     let mut vision_credit_user_id = None;
     let mut vision_credit_session_token = None;
 
-    if args.vision {
+    if vision_enabled {
         let runtime = Runtime::new().context("failed to create async runtime for credit checks")?;
         let session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
@@ -655,7 +656,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
     }
 
     // Optional: call python vision backend to get labels/safesearch/text/web/image properties.
-    let vision_map = if args.vision {
+    let vision_map = if vision_enabled {
         eprintln!(
             "Running Google Vision analysis with {} feature(s): {}",
             vision_features.len(),
@@ -743,7 +744,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
                     ));
                 }
             }
-            if normalized_rule == "explicit" && args.vision {
+            if normalized_rule == "explicit" && vision_enabled {
                 if let Some(vm) = &vision_map {
                     if let Some(vr) = vm.get(&img.to_string_lossy().to_string()) {
                         if let Some(ss) = &vr.safe_search {
@@ -767,8 +768,8 @@ fn run_cut(args: CutArgs) -> Result<()> {
             }
         }
 
-        if args.vision {
-            if let Some(query) = args.contains.as_deref() {
+        if vision_enabled {
+            if let Some(query) = vision_label {
                 if let Some(vm) = &vision_map {
                     if let Some(vr) = vm.get(&img.to_string_lossy().to_string()) {
                         let matched_labels = matching_vision_labels(query, &vr.labels);
@@ -817,7 +818,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         run_id: chrono_run_id(),
         target_path: target.to_string_lossy().to_string(),
         rule: args.cut_rule.clone(),
-        contains: args.contains.clone(),
+        find: args.find.clone(),
         destination: Some(cut_dir_path.to_string_lossy().to_string()),
         dry_run: args.dry_run,
         scanned_count: images.len(),

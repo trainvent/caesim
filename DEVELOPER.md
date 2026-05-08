@@ -97,7 +97,7 @@ Start simple and deterministic:
    - filename patterns (e.g., screenshot naming)
    - exact hash duplicates
    - common exported-copy names (e.g., `image (1).svg` when `image.svg` exists)
-   - optional Google Vision duplicate signals behind `--vision`
+   - optional Google Vision duplicate signals behind `--find`
 3. Image-stat placeholders:
    - brightness threshold
    - blur score threshold
@@ -108,7 +108,7 @@ Keep rule processing modular so we can add model-based classification later.
 
 Backboard is **not required** for the MVP deterministic CLI or image recognition.
 Keep the product local and deterministic by default, with only the optional Python
-Google Vision backend behind an explicit `--vision` flag. A later Backboard integration
+Google Vision backend behind an explicit `--find` flag. A later Backboard integration
 may become useful in
 two places:
 
@@ -236,9 +236,9 @@ pip install -r requirements.txt
 **Run with Vision enabled:**
 
 ```bash
-cargo run -- cut ./my-photos --rule explicit --vision --dry-run
-cargo run -- cut ./my-photos --rule duplicates --vision --dry-run
-cargo run -- cut ./my-photos --contains cars --vision --dry-run
+cargo run -- cut ./my-photos --rule explicit --find safety --dry-run
+cargo run -- cut ./my-photos --rule duplicates --find --dry-run
+cargo run -- cut ./my-photos --find cars --dry-run
 ```
 
 ### AI-assisted command creation (Backboard)
