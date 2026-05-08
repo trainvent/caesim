@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	cargo build --release --locked
+
+override_dh_auto_install:
+	install -d debian/caesim/usr/bin
+	install -m 0755 target/release/caesim debian/caesim/usr/bin/caesim

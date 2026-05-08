@@ -10,6 +10,13 @@ Caesim is a local CLI utility for safely trimming large image libraries. Describ
 cargo install --path .
 ```
 
+To build a Debian package you can install with `apt`:
+
+```bash
+dpkg-buildpackage -b -us -uc
+sudo apt install ../caesim_0.1.0_amd64.deb
+```
+
 ### Basic Usage
 
 Move all screenshots to a `cut` folder for review:
@@ -52,7 +59,7 @@ caesim cut ./my-photos --rule landscape --destination ./review
 Let an AI assistant help you write the command:
 
 ```bash
-caesim --ai-assist
+caesim ai-assist
 ```
 
 ### Vision label search

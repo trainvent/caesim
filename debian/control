@@ -1,0 +1,14 @@
+Source: caesim
+Section: utils
+Priority: optional
+Maintainer: Trainvent <dev@trainvent.com>
+Rules-Requires-Root: no
+Build-Depends: debhelper-compat (= 13), cargo, rustc, libssl-dev, pkg-config
+Standards-Version: 4.6.2
+
+Package: caesim
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: Safe image-library trimming utility
+ Caesim is a local CLI for scanning image libraries and moving selected files
+ into a review folder instead of deleting them.

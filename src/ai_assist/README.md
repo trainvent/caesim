@@ -18,4 +18,10 @@ let resp = ai_assist::interact(&api_key, "cut landscape photos into review").awa
 if let Some(cmd) = resp.command { /* ... */ }
 ```
 
+CLI usage:
+
+```bash
+caesim ai-assist
+```
+
 This implements a minimal JSON request/response wrapper; consult Backboard docs for the official schema.

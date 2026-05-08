@@ -22,16 +22,15 @@ use tokio::runtime::Runtime;
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-
-    /// Interactive AI assistant for generating caesim commands
-    #[arg(long = "ai-assist")]
-    ai_assist: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Scan a folder and move matched images into a cut folder
     Cut(CutArgs),
+    /// Interactive AI assistant for generating caesim commands
+    #[command(name = "ai-assist")]
+    AiAssist,
     /// Configure and learn about Google Vision setup
     Vision(VisionArgs),
     /// Create a local account session with one-time password signup
@@ -205,12 +204,10 @@ struct VisionResponse {
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
     let cli = Cli::parse();
-    if cli.ai_assist {
-        return run_assist();
-    }
 
     match cli.command {
         Some(Commands::Cut(args)) => run_cut(args),
+        Some(Commands::AiAssist) => run_assist(),
         Some(Commands::Vision(args)) => run_vision(args),
         Some(Commands::Signup(args)) => run_signup(args),
         Some(Commands::Login(args)) => run_login(args),
@@ -872,6 +869,9 @@ fn run_assist() -> Result<()> {
 
     let api_key = std::env::var("BACKBOARD_API_KEY_CAESIM")
         .context("BACKBOARD_API_KEY_CAESIM environment variable not set")?;
+    let session = auth::load_session()?.ok_or_else(|| anyhow!("ai-assist requires a local session; run `caesim login` first"))?;
+    let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+    let supabase_key = auth::default_supabase_anon_key()?;
     let mut thread_id: Option<String> = std::env::var("BACKBOARD_THREAD_ID").ok();
 
     loop {
@@ -900,6 +900,18 @@ fn run_assist() -> Result<()> {
         if input.is_empty() {
             continue;
         }
+
+        let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
+        if me.credit_balance < 1 {
+            return Err(anyhow!(
+                "insufficient credits for ai-assist: have {}, need 1",
+                me.credit_balance
+            ));
+        }
+
+        eprintln!("Toy credits: ai-assist will cost 1 credit; current balance is {}.", me.credit_balance);
+        let new_balance = auth::consume_credits(&supabase_url, &supabase_key, &session.user_id, &session.session_token, 1).await?;
+        eprintln!("Toy credits: charged 1 credit; new balance is {}.", new_balance);
 
         match ai_assist::interact(&api_key, input, thread_id.clone()).await {
             Ok(response) => {

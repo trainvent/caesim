@@ -196,6 +196,15 @@ Also write a compact mapping file for easy rollback:
 cargo build
 ```
 
+### Debian package build
+
+Build a local `.deb` that can be installed with `apt`:
+
+```bash
+dpkg-buildpackage -b -us -uc
+sudo apt install ../caesim_0.1.0_amd64.deb
+```
+
 Run the compiled binary:
 
 ```bash
@@ -246,7 +255,7 @@ cargo run -- cut ./my-photos --find cars --dry-run
 Use **Backboard** to generate commands from natural language:
 
 ```bash
-cargo run -- --ai-assist
+cargo run -- ai-assist
 ```
 
 Describe what you want to clean up (e.g., "remove all screenshots"), and Backboard will suggest a `caesim` command before execution.
