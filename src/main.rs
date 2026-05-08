@@ -223,6 +223,18 @@ fn main() -> Result<()> {
     }
 }
 
+fn ensure_signed_out_for_auth(command_name: &str) -> Result<()> {
+    if let Some(session) = auth::load_session()? {
+        return Err(anyhow!(
+            "already signed in as {} ({}); run `caesim logout` before `caesim {}`",
+            session.email,
+            session.user_id,
+            command_name
+        ));
+    }
+    Ok(())
+}
+
 async fn complete_otp_session(
     supabase_url: &str,
     supabase_key: &str,
@@ -269,6 +281,7 @@ async fn complete_otp_session(
 }
 
 fn run_signup(args: SignupArgs) -> Result<()> {
+    ensure_signed_out_for_auth("signup")?;
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
         let supabase_url = auth::default_supabase_url()?;
@@ -291,6 +304,7 @@ fn run_signup(args: SignupArgs) -> Result<()> {
 }
 
 fn run_login(args: LoginArgs) -> Result<()> {
+    ensure_signed_out_for_auth("login")?;
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
         let supabase_url = auth::default_supabase_url()?;
