@@ -201,12 +201,30 @@ cargo build
 Build a local `.deb` that can be installed with `apt`:
 
 ```bash
-sudo apt install debhelper cargo rustc libssl-dev pkg-config
+sudo apt install debhelper cargo rustc pkg-config
 dpkg-buildpackage -b -us -uc
 sudo apt install ../caesim_0.1.0_amd64.deb
 ```
 
 If `cargo` and `rustc` come from rustup instead of apt, Debian's build-dependency check may still fail. In that case, use `dpkg-buildpackage -d` locally or build inside a Debian environment where those toolchains are installed as packages.
+
+### GitHub Releases (tagged builds)
+
+Tagged pushes matching `v*` run `.github/workflows/release-deb.yml` on GitHub Actions.
+
+The workflow:
+
+1. Checks out the tagged commit.
+2. Installs `debhelper`, `cargo`, `rustc`, and `pkg-config`.
+3. Runs `dpkg-buildpackage -b -us -uc`.
+4. Uploads the resulting `.deb` and optional debug-symbol `.ddeb` to the GitHub Release.
+
+Create and push a release tag with:
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
 
 Run the compiled binary:
 
