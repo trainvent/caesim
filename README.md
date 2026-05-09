@@ -13,7 +13,7 @@ cargo install --path .
 To build a Debian package you can install with `apt`:
 
 ```bash
-sudo apt install debhelper cargo rustc libssl-dev pkg-config
+sudo apt install debhelper cargo rustc pkg-config
 dpkg-buildpackage -b -us -uc
 sudo apt install ../caesim_0.1.0_amd64.deb
 ```

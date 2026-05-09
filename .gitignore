@@ -4,3 +4,13 @@ target/
 .caesim-report.json
 start.sh
 assets/test
+debian/.debhelper/
+debian/caesim/
+debian/caesim-dbgsym/
+debian/*.buildinfo
+debian/*.changes
+debian/*.deb
+debian/*.ddeb
+debian/*.substvars
+debian/debhelper-build-stamp
+debian/files
