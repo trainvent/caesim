@@ -224,8 +224,8 @@ The workflow:
 Create and push a release tag with:
 
 ```bash
-git tag -a v0.1.0 -m "v0.1.0"
-git push origin v0.1.0
+git tag -a v<release_code> -m "v<release_code>"
+git push origin v<release_code>
 ```
 
 Run the compiled binary:
