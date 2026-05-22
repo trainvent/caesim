@@ -28,13 +28,6 @@ jobs:
           sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
           # Overwrite debian/changelog to match the release tag
           cat > debian/changelog <<EOF
-caesim ($VERSION) unstable; urgency=medium
-
-  * Release $VERSION.
-
- -- Trainvent <dev@trainvent.com>  $(date -R)
-EOF
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
