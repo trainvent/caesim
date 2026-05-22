@@ -36,7 +36,7 @@ Search by Vision label:
 caesim cut ./photos --find receipt --dry-run
 ```
 
-Caesim writes a JSON report after each run. By default it is saved as `.caesim-report.json` in the scanned folder.
+Caesim writes a JSON report after each run. By default it is saved in your XDG cache directory (or `$HOME/.cache/caesim`) so it does not clutter the scanned folder. Report filenames are now prefixed with the run id, for example: `1779436443-Random_Images.caesim-report.json`. You can still override the path with `--report`.
 
 You can restore a previous cut from that report with:
 

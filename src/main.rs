@@ -730,10 +730,24 @@ fn run_cut(args: CutArgs) -> Result<()> {
         .map(|vm| build_vision_duplicate_sources(&images, vm))
         .unwrap_or_default();
 
-    let report_path = args
-        .report
-        .clone()
-        .unwrap_or_else(|| target.join(".caesim-report.json"));
+    // compute a run id early so the report filename can be prefixed by it
+    let run_id = chrono_run_id();
+
+    let report_path = args.report.clone().unwrap_or_else(|| {
+        // Default to XDG cache dir if available, otherwise $HOME/.cache, then ./
+        let cache_base = std::env::var("XDG_CACHE_HOME").map(PathBuf::from).or_else(|_| {
+            std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache"))
+        });
+
+        let cache_dir = cache_base.unwrap_or_else(|_| PathBuf::from("."));
+        let caesim_cache = cache_dir.join("caesim");
+        // Use the target folder name to create a stable report name
+        let target_name = target
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "root".to_string());
+        caesim_cache.join(format!("{}-{}.caesim-report.json", run_id, target_name))
+    });
 
     // score / match
     let mut entries: Vec<ReportEntry> = Vec::new();
@@ -847,7 +861,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
     }
 
     let report = RunReport {
-        run_id: chrono_run_id(),
+        run_id: run_id.clone(),
         target_path: target.to_string_lossy().to_string(),
         rule: args.cut_rule.clone(),
         find: args.find.clone(),
@@ -896,11 +910,47 @@ fn run_cut(args: CutArgs) -> Result<()> {
 }
 
 fn run_cut_undo(report_path: Option<PathBuf>) -> Result<()> {
-    let report_path = report_path.unwrap_or_else(|| {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(".caesim-report.json")
-    });
+    // If the user didn't provide a report path, attempt to find the newest report in cache
+    let report_path = match report_path {
+        Some(p) => p,
+        None => {
+            let cache_base = std::env::var("XDG_CACHE_HOME").map(PathBuf::from).or_else(|_| {
+                std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache"))
+            });
+
+            let cache_dir = cache_base.unwrap_or_else(|_| PathBuf::from("."));
+            let caesim_cache = cache_dir.join("caesim");
+            if caesim_cache.exists() && caesim_cache.is_dir() {
+                let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+                for entry in fs::read_dir(&caesim_cache).unwrap_or_else(|_| fs::read_dir(".").unwrap()) {
+                    if let Ok(entry) = entry {
+                        let path = entry.path();
+                        if path.is_file() && path.to_string_lossy().ends_with(".caesim-report.json") {
+                            if let Ok(meta) = entry.metadata() {
+                                if let Ok(mtime) = meta.modified() {
+                                    match &latest {
+                                        Some((t, _)) if *t >= mtime => {}
+                                        _ => latest = Some((mtime, path.clone())),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some((_, p)) = latest {
+                    p
+                } else {
+                    std::env::current_dir()
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(".caesim-report.json")
+                }
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".caesim-report.json")
+            }
+        }
+    };
 
     if !report_path.exists() {
         return Err(anyhow!("report does not exist: {}", report_path.display()));
@@ -951,6 +1001,16 @@ fn run_cut_undo(report_path: Option<PathBuf>) -> Result<()> {
         restored_count += 1;
     }
 
+    if !report.cut_dir.trim().is_empty() {
+        let cut_dir_path = PathBuf::from(&report.cut_dir);
+        if cut_dir_path.is_dir() && is_dir_empty(&cut_dir_path)? {
+            fs::remove_dir(&cut_dir_path).with_context(|| {
+                format!("failed to remove empty cut directory {}", cut_dir_path.display())
+            })?;
+            eprintln!("Removed empty cut directory {}.", cut_dir_path.display());
+        }
+    }
+
     eprintln!(
         "Restored {} file(s) from report {}.",
         restored_count,
@@ -966,6 +1026,12 @@ fn is_cut_undo_request(args: &CutArgs) -> bool {
         && args.destination.is_none()
         && !args.dry_run
         && args.cut_img.is_none()
+}
+
+fn is_dir_empty(path: &Path) -> Result<bool> {
+    let mut entries = fs::read_dir(path)
+        .with_context(|| format!("failed to inspect directory {}", path.display()))?;
+    Ok(entries.next().is_none())
 }
 
 fn run_assist() -> Result<()> {
@@ -1336,6 +1402,11 @@ fn unique_restore_destination(source: &Path) -> Result<PathBuf> {
 }
 
 fn write_report(path: &Path, report: &RunReport) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create report directory {}", parent.display()))?;
+    }
+
     let json = serde_json::to_string_pretty(report)?;
     let mut f = fs::File::create(path)?;
     f.write_all(json.as_bytes())?;
