@@ -17,6 +17,10 @@ else
   echo "version = \"${VERSION}\"" >> Cargo.toml
 fi
 
+# Keep the root package entry in Cargo.lock aligned with Cargo.toml so
+# `cargo build --locked` does not try to refresh the lockfile.
+VERSION="${VERSION}" perl -0pi -e 's{(\[\[package\]\]\nname = "caesim"\nversion = ")[^"]+(")}{$1 . $ENV{VERSION} . $2}se' Cargo.lock
+
 # Write debian/changelog
 cat > debian/changelog <<EOF
 caesim (${VERSION}) unstable; urgency=medium

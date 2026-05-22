@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Git tag to package, for example v0.1.4
+        description: Git tag to package, style vX.X.X
         required: true
         type: string
 
