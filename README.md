@@ -8,11 +8,7 @@ Caesim is a safe image-library trimming CLI. It scans a folder, finds images tha
 cargo install --path .
 ```
 
-To install a Debian release artifact:
-
-```bash
-sudo apt install ./caesim_0.1.0_amd64.deb
-```
+Or download and install the ready made package
 
 ## Quick Start
 
@@ -41,6 +37,12 @@ caesim cut ./photos --find receipt --dry-run
 ```
 
 Caesim writes a JSON report after each run. By default it is saved as `.caesim-report.json` in the scanned folder.
+
+You can restore a previous cut from that report with:
+
+```bash
+caesim cut undo --report ./photos/.caesim-report.json
+```
 
 ## Rules
 

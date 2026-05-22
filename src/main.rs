@@ -216,7 +216,13 @@ fn main() -> Result<()> {
     };
 
     match cli.command {
-        Some(Commands::Cut(args)) => run_cut(args),
+        Some(Commands::Cut(args)) => {
+            if is_cut_undo_request(&args) {
+                run_cut_undo(args.report.clone())
+            } else {
+                run_cut(args)
+            }
+        }
         Some(Commands::AiAssist) => run_assist(),
         Some(Commands::Vision(args)) => run_vision(args),
         Some(Commands::Signup(args)) => run_signup(args),
@@ -889,6 +895,79 @@ fn run_cut(args: CutArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_cut_undo(report_path: Option<PathBuf>) -> Result<()> {
+    let report_path = report_path.unwrap_or_else(|| {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(".caesim-report.json")
+    });
+
+    if !report_path.exists() {
+        return Err(anyhow!("report does not exist: {}", report_path.display()));
+    }
+    if !report_path.is_file() {
+        return Err(anyhow!("report is not a file: {}", report_path.display()));
+    }
+
+    let report_bytes = fs::read(&report_path)
+        .with_context(|| format!("failed to read report {}", report_path.display()))?;
+    let report: RunReport = serde_json::from_slice(&report_bytes)
+        .with_context(|| format!("failed to parse report {}", report_path.display()))?;
+
+    if report.dry_run {
+        eprintln!("Report was a dry run; nothing to restore.");
+        return Ok(());
+    }
+
+    let mut restored_count = 0usize;
+    for entry in &report.entries {
+        let Some(destination) = entry.destination.as_ref() else {
+            continue;
+        };
+
+        let source_path = PathBuf::from(&entry.source);
+        let destination_path = PathBuf::from(destination);
+
+        if !destination_path.exists() {
+            return Err(anyhow!(
+                "cannot restore missing file: {}",
+                destination_path.display()
+            ));
+        }
+
+        if let Some(parent) = source_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+
+        let restore_path = unique_restore_destination(&source_path)?;
+        fs::rename(&destination_path, &restore_path).with_context(|| {
+            format!(
+                "failed to restore {} -> {}",
+                destination_path.display(),
+                restore_path.display()
+            )
+        })?;
+        restored_count += 1;
+    }
+
+    eprintln!(
+        "Restored {} file(s) from report {}.",
+        restored_count,
+        report_path.display()
+    );
+    Ok(())
+}
+
+fn is_cut_undo_request(args: &CutArgs) -> bool {
+    args.path.as_os_str() == "undo"
+        && args.cut_rule.is_none()
+        && args.find.is_none()
+        && args.destination.is_none()
+        && !args.dry_run
+        && args.cut_img.is_none()
+}
+
 fn run_assist() -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async {
@@ -1224,6 +1303,35 @@ fn unique_destination(cut_dir: &Path, src: &Path) -> Result<PathBuf> {
             break;
         }
     }
+    Ok(dest)
+}
+
+fn unique_restore_destination(source: &Path) -> Result<PathBuf> {
+    let parent = source
+        .parent()
+        .ok_or_else(|| anyhow!("missing restore parent: {}", source.display()))?;
+    let filename = source
+        .file_name()
+        .ok_or_else(|| anyhow!("missing filename: {}", source.display()))?;
+    let mut dest = parent.join(filename);
+    if !dest.exists() {
+        return Ok(dest);
+    }
+
+    let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("");
+    for i in 1..10_000u32 {
+        let candidate = if ext.is_empty() {
+            parent.join(format!("{stem}_{i}"))
+        } else {
+            parent.join(format!("{stem}_{i}.{ext}"))
+        };
+        if !candidate.exists() {
+            dest = candidate;
+            break;
+        }
+    }
+
     Ok(dest)
 }
 
