@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     /// Scan a folder and move matched images into a cut folder
     Cut(CutArgs),
-    /// Interactive AI assistant for generating caesim commands
+    /// AI assistant for generating caesim commands delivered by backboard.io
     #[command(name = "ai-assist")]
     AiAssist,
     /// Configure and learn about Google Vision setup
@@ -203,7 +203,17 @@ struct VisionResponse {
 
 fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            if is_missing_cut_rule_value_error(&err.to_string()) {
+                print_available_cut_rules();
+                return Ok(());
+            }
+
+            return Err(err.into());
+        }
+    };
 
     match cli.command {
         Some(Commands::Cut(args)) => run_cut(args),
@@ -217,6 +227,25 @@ fn main() -> Result<()> {
         Some(Commands::Credits(args)) => run_credits(args),
         None => Err(anyhow!("no command provided; run `caesim --help` to list available commands")),
     }
+}
+
+fn print_available_cut_rules() {
+    println!("Available cut rules:");
+    for rule in available_cut_rules() {
+        println!("  - {rule}");
+    }
+    println!();
+    println!("Example:");
+    println!("  caesim cut <path> --rule duplicates --dry-run");
+}
+
+fn available_cut_rules() -> &'static [&'static str] {
+    &["screenshots", "duplicates", "explicit", "landscape", "portrait"]
+}
+
+fn is_missing_cut_rule_value_error(message: &str) -> bool {
+    message.contains("a value is required for '--rule <CUT_RULE>'")
+        && message.contains("but none was supplied")
 }
 
 fn ensure_signed_out_for_auth(command_name: &str) -> Result<()> {
@@ -1517,6 +1546,7 @@ mod tests {
 
     #[test]
     fn rule_features_cover_only_special_cases() {
+        assert_eq!(available_cut_rules(), &["screenshots", "duplicates", "explicit", "landscape", "portrait"]);
         assert_eq!(vision_features_for_rule("food"), Vec::<String>::new());
         assert_eq!(vision_features_for_rule("screenshots"), Vec::<String>::new());
         assert_eq!(vision_features_for_rule("duplicates"), vec![
@@ -1529,6 +1559,16 @@ mod tests {
             vision_features_for_rule("explicit"),
             vec!["SAFE_SEARCH_DETECTION"]
         );
+    }
+
+    #[test]
+    fn recognizes_missing_rule_value_error() {
+        assert!(is_missing_cut_rule_value_error(
+            "error: a value is required for '--rule <CUT_RULE>' but none was supplied"
+        ));
+        assert!(!is_missing_cut_rule_value_error(
+            "error: the following required arguments were not provided: <PATH>"
+        ));
     }
 
     #[test]

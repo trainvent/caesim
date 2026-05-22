@@ -8,17 +8,13 @@ Caesim is a safe image-library trimming CLI. It scans a folder, finds images tha
 cargo install --path .
 ```
 
-To build a Debian package:
+To install a Debian release artifact:
 
 ```bash
-sudo apt install debhelper cargo rustc pkg-config
-dpkg-buildpackage -b -us -uc
-sudo apt install ../caesim_0.1.0_amd64.deb
+sudo apt install ./caesim_0.1.0_amd64.deb
 ```
 
-If your Rust toolchain was installed outside apt, `dpkg-buildpackage -d` may be needed.
-
-## Usage
+## Quick Start
 
 Preview a run first:
 
@@ -46,16 +42,17 @@ caesim cut ./photos --find receipt --dry-run
 
 Caesim writes a JSON report after each run. By default it is saved as `.caesim-report.json` in the scanned folder.
 
-## Cut Rules
+## Rules
 
 Current local rules:
 
 - `screenshots`
 - `duplicates`
+- `explicit`
 - `landscape`
 - `portrait`
 
-`explicit` is available with Vision mode, where it uses Google SafeSearch signals. `--find <label>` also enables Vision mode for label searches such as `food`, `receipt`, or `cars`.
+`explicit` uses Google SafeSearch signals when Vision mode is enabled. `--find <label>` also enables Vision mode for label searches such as `receipt` or `cars`.
 
 Useful options:
 
@@ -64,7 +61,7 @@ Useful options:
 - `--cut-dir <name>`: change the default `cut` folder name
 - `--report <file>`: choose the report path
 
-## Vision
+## Vision Mode
 
 Vision mode requires a local Caesim session, credits, Google credentials, and the Python Vision backend dependencies.
 
@@ -84,11 +81,7 @@ You can point Caesim at a custom backend with `CAESIM_VISION_BACKEND`.
 
 ## Accounts and AI Assist
 
-Account commands use Supabase environment variables from `.env` or the shell:
-
-- `CAESIM_SUPABASE_URL`
-- `CAESIM_SUPABASE_ANON_KEY`
-- optional: `CAESIM_SUPABASE_SERVICE_ROLE_KEY`
+For Supabase environment variables and session setup, see [DEVELOPER.md](DEVELOPER.md).
 
 Common commands:
 
@@ -102,6 +95,7 @@ caesim logout
 
 `caesim ai-assist` starts an interactive assistant that turns cleanup requests into safe `caesim cut` commands.
 
-## Development
+## Documentation
 
-See [DEVELOPER.md](DEVELOPER.md) for implementation notes, CLI details, and test guidance.
+- [CONTRIBUTING.md](CONTRIBUTING.md) for contributor workflow and pull request expectations.
+- [DEVELOPER.md](DEVELOPER.md) for architecture, implementation notes, and release details.

@@ -2,6 +2,8 @@
 
 This recipe is based on the current `caesim.com` concept page: a local tool that moves unwanted images into a `cut` folder for review.
 
+Use [README.md](README.md) for end-user install and usage, and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor workflow.
+
 ## 1. Product Contract
 
 Build a safe image-library trimming utility with:
@@ -299,6 +301,7 @@ Caesim uses **Supabase Auth** directly for account management and session handli
 
 ```bash
 export CAESIM_SUPABASE_URL="https://<project-ref>.supabase.co"
+export CAESIM_SUPABASE_ANON_KEY="<anon-key>"
 export CAESIM_SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
 ```
 
