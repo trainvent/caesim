@@ -19,15 +19,8 @@ jobs:
           fetch-depth: 0
 
       - name: Set package version from tag
-        run: |
-          set -euo pipefail
-          VERSION="${GITHUB_REF#refs/tags/}"
-          VERSION="${VERSION#v}"
-          echo "Setting package version to $VERSION"
-          # Update Cargo.toml version
-          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
-          # Overwrite debian/changelog to match the release tag
-          cat > debian/changelog <<EOF
+        run: ./.github/scripts/set-version.sh
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
