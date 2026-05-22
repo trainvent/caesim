@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Determine version from tag (GITHUB_REF expected in CI)
-if [ -z "${GITHUB_REF:-}" ]; then
-  echo "GITHUB_REF is not set; expecting refs/tags/vX.Y.Z" >&2
+# Determine version from RELEASE_TAG first, then GITHUB_REF in CI.
+TAG="${RELEASE_TAG:-${GITHUB_REF:-}}"
+if [ -z "${TAG}" ]; then
+  echo "Missing release tag; set RELEASE_TAG or run from a tag push" >&2
   exit 1
 fi
-VERSION="${GITHUB_REF#refs/tags/}"
+VERSION="${TAG#refs/tags/}"
 VERSION="${VERSION#v}"
 echo "Setting package version to ${VERSION}"
 
