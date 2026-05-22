@@ -19,7 +19,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set package version from tag
-        run: ./.github/scripts/set-version.sh
+        run: bash ./.github/scripts/set-version.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
