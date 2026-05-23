@@ -337,10 +337,15 @@ pub async fn change_password_with_otp(base_url: &str, anon_key: &str, email: &st
 
 pub async fn fetch_me(base_url: &str, anon_key: &str, user_id: &str, session_token: &str) -> Result<MeResponse> {
     let auth_json = fetch_supabase_user_raw(base_url, anon_key, Some(user_id), session_token).await?;
-    let table_row = if let Some(service_role_key) = default_supabase_service_role_key() {
-        fetch_public_user_row(base_url, &service_role_key, user_id).await?
-    } else {
-        None
+    let table_row = match fetch_public_user_row_as_authenticated_user(base_url, anon_key, session_token, user_id).await {
+        Ok(row) => row,
+        Err(_) => {
+            if let Some(service_role_key) = default_supabase_service_role_key() {
+                fetch_public_user_row(base_url, &service_role_key, user_id).await.ok().flatten()
+            } else {
+                None
+            }
+        }
     };
 
     let user_id = auth_json
@@ -369,6 +374,15 @@ pub async fn fetch_me(base_url: &str, anon_key: &str, user_id: &str, session_tok
         .unwrap_or("active")
         .to_string();
 
+    // If a credit gateway URL is configured, prefer it for an authoritative balance.
+    let credit_balance = match std::env::var("CAESIM_CREDIT_GATEWAY_URL") {
+        Ok(gw) => match gateway_balance(&gw, &session_token).await {
+            Ok(b) => b,
+            Err(_) => credit_balance, // fallback to table or metadata on error
+        },
+        Err(_) => credit_balance,
+    };
+
     Ok(MeResponse {
         user_id,
         email,
@@ -377,6 +391,62 @@ pub async fn fetch_me(base_url: &str, anon_key: &str, user_id: &str, session_tok
         has_password,
         expires_at: unix_ts() + 30 * 24 * 60 * 60,
     })
+}
+
+async fn gateway_balance(gateway_url: &str, session_token: &str) -> Result<i64> {
+    let client = Client::new();
+    let resp = client
+        .post(gateway_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", session_token))
+        .json(&serde_json::json!({"action": "balance"}))
+        .send()
+        .await
+        .with_context(|| format!("failed to contact credit gateway at {}", gateway_url))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(anyhow!("credit gateway returned {}: {}", status, body));
+    }
+
+    let json: Value = serde_json::from_str(&body).context("failed to parse credit gateway response")?;
+    let bal = json
+        .get("credit_balance")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow!("credit gateway did not include credit_balance"))?;
+    Ok(bal)
+}
+
+async fn gateway_consume(gateway_url: &str, session_token: &str, amount: i64) -> Result<i64> {
+    let client = Client::new();
+    let resp = client
+        .post(gateway_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", session_token))
+        .json(&serde_json::json!({"action": "consume", "amount": amount}))
+        .send()
+        .await
+        .with_context(|| format!("failed to contact credit gateway at {}", gateway_url))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if status.as_u16() == 409 {
+        return Err(anyhow!("insufficient credits: {}", body));
+    }
+
+    if !status.is_success() {
+        return Err(anyhow!("credit gateway returned {}: {}", status, body));
+    }
+
+    let json: Value = serde_json::from_str(&body).context("failed to parse credit gateway response")?;
+    let bal = json
+        .get("credit_balance")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow!("credit gateway did not include credit_balance"))?;
+    Ok(bal)
 }
 
 pub async fn add_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
@@ -400,6 +470,12 @@ pub async fn add_credits(base_url: &str, anon_key: &str, user_id: &str, session_
 pub async fn consume_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
     if amount_credits <= 0 {
         return Err(anyhow!("amount must be greater than 0"));
+    }
+
+    // If a credit gateway is configured, delegate consumption to it.
+    if let Ok(gw) = std::env::var("CAESIM_CREDIT_GATEWAY_URL") {
+        let new_balance = gateway_consume(&gw, session_token, amount_credits).await?;
+        return Ok(new_balance);
     }
 
     let current = fetch_me(base_url, anon_key, user_id, session_token).await?.credit_balance;
@@ -596,6 +672,33 @@ async fn fetch_public_user_row(base_url: &str, service_role_key: &str, user_id: 
     if !response.status().is_success() {
         let error_text = response.text().await.unwrap_or_default();
         return Err(anyhow!("failed to fetch public user row: {}", error_text));
+    }
+
+    let rows: Vec<Value> = response
+        .json()
+        .await
+        .context("failed to parse public user row response")?;
+
+    Ok(rows.into_iter().next())
+}
+
+async fn fetch_public_user_row_as_authenticated_user(
+    base_url: &str,
+    anon_key: &str,
+    session_token: &str,
+    user_id: &str,
+) -> Result<Option<Value>> {
+    let url = format!("{}/rest/v1/users?select=*&id=eq.{}&limit=1", normalize_base_url(base_url), user_id);
+    let response = Client::new()
+        .get(&url)
+        .header("apikey", anon_key)
+        .header("Authorization", format!("Bearer {session_token}"))
+        .send()
+        .await
+        .with_context(|| format!("failed to fetch public user row at {url}"))?;
+
+    if !response.status().is_success() {
+        return Ok(None);
     }
 
     let rows: Vec<Value> = response

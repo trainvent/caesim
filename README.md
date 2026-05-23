@@ -97,6 +97,16 @@ caesim logout
 
 `caesim ai-assist` starts an interactive assistant that turns cleanup requests into safe `caesim cut` commands.
 
+## Version Bumps
+
+To bump the release version in one step, run:
+
+```bash
+./scripts/bump-version.sh 0.1.6
+```
+
+This updates [Cargo.toml](Cargo.toml), [Cargo.lock](Cargo.lock), and [debian/changelog](debian/changelog), then runs the version checks and a build.
+
 ## Documentation
 
 - [CONTRIBUTING.md](CONTRIBUTING.md) for contributor workflow and pull request expectations.

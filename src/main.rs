@@ -294,7 +294,7 @@ async fn complete_otp_session(
         let profile = auth::fetch_me(supabase_url, supabase_key, &session.user_id, &session.session_token).await?;
         auth::sync_public_user_row(supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
     } else {
-        eprintln!("Public user table sync skipped: set SUPABASE_SECRET_KEY to create/update the table row.");
+        eprintln!("Public user table sync skipped: set SUPABASE_SECRET_KEY only if you want Caesim to create/update the public users row.");
     }
 
     let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
@@ -379,7 +379,7 @@ fn run_login(args: LoginArgs) -> Result<()> {
                     let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
                     auth::sync_public_user_row(&supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
                 } else {
-                    eprintln!("Public user table sync skipped: set SUPABASE_SECRET_KEY to create/update the table row.");
+                    eprintln!("Public user table sync skipped: set SUPABASE_SECRET_KEY only if you want Caesim to create/update the public users row.");
                 }
                 Ok(())
             }
