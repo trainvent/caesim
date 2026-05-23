@@ -60,9 +60,10 @@ pub fn default_supabase_url() -> Result<String> {
 
 pub fn default_supabase_anon_key() -> Result<String> {
     env::var("CAESIM_SUPABASE_ANON_KEY")
+    .or_else(|_| env::var("CAESIM_SUPABASE_KEY"))
         .or_else(|_| env::var("SUPABASE_ANON_KEY"))
-        .or_else(|_| env::var("SUPABASE_SECRET_KEY"))
-        .context("CAESIM_SUPABASE_ANON_KEY, SUPABASE_ANON_KEY, or SUPABASE_SECRET_KEY environment variable not set")
+    .or_else(|_| env::var("SUPABASE_KEY"))
+    .context("CAESIM_SUPABASE_ANON_KEY, CAESIM_SUPABASE_KEY, SUPABASE_ANON_KEY, or SUPABASE_KEY environment variable not set")
 }
 
 pub fn default_supabase_service_role_key() -> Option<String> {
