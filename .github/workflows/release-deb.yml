@@ -24,10 +24,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set package version from tag
+      - name: Check package version matches tag
         env:
           RELEASE_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
-        run: bash ./.github/scripts/set-version.sh
+        run: bash ./.github/scripts/check-version.sh
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
