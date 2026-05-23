@@ -301,9 +301,10 @@ Caesim uses **Supabase Auth** directly for account management and session handli
 
 ```bash
 export CAESIM_SUPABASE_URL="https://<project-ref>.supabase.co"
-export CAESIM_SUPABASE_ANON_KEY="<anon-key>"
-export CAESIM_SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+export SUPABASE_SECRET_KEY="<service-role-key>"
 ```
+
+`SUPABASE_SECRET_KEY` is the canonical secret name used by the app. The legacy `CAESIM_SUPABASE_ANON_KEY` and `CAESIM_SUPABASE_SERVICE_ROLE_KEY` names are still accepted for local compatibility.
 
 The service-role key is only needed if you want Caesim to manage credit balances in a `users` table. Keep it on a trusted machine only.
 

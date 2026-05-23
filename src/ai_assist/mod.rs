@@ -4,7 +4,7 @@ use serde_json::Value;
 use reqwest::Client;
 
 mod config;
-pub use config::AssistantConfig;
+pub use config::{default_api_key, AssistantConfig};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AssistRequest {

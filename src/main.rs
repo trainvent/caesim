@@ -294,7 +294,7 @@ async fn complete_otp_session(
         let profile = auth::fetch_me(supabase_url, supabase_key, &session.user_id, &session.session_token).await?;
         auth::sync_public_user_row(supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
     } else {
-        eprintln!("Public user table sync skipped: set CAESIM_SUPABASE_SERVICE_ROLE_KEY to create/update the table row.");
+        eprintln!("Public user table sync skipped: set SUPABASE_SECRET_KEY to create/update the table row.");
     }
 
     let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
@@ -379,7 +379,7 @@ fn run_login(args: LoginArgs) -> Result<()> {
                     let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
                     auth::sync_public_user_row(&supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
                 } else {
-                    eprintln!("Public user table sync skipped: set CAESIM_SUPABASE_SERVICE_ROLE_KEY to create/update the table row.");
+                    eprintln!("Public user table sync skipped: set SUPABASE_SECRET_KEY to create/update the table row.");
                 }
                 Ok(())
             }
@@ -1041,8 +1041,7 @@ fn run_assist() -> Result<()> {
     eprintln!("Describe what you'd like to do with your image library.");
     eprintln!("(Type 'help' for examples, or 'quit' to exit)\n");
 
-    let api_key = std::env::var("BACKBOARD_API_KEY_CAESIM")
-        .context("BACKBOARD_API_KEY_CAESIM environment variable not set")?;
+    let api_key = ai_assist::default_api_key()?;
     let session = auth::load_session()?.ok_or_else(|| anyhow!("ai-assist requires a local session; run `caesim login` first"))?;
     let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
     let supabase_key = auth::default_supabase_anon_key()?;

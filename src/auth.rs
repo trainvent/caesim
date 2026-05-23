@@ -66,10 +66,10 @@ pub fn default_supabase_anon_key() -> Result<String> {
 }
 
 pub fn default_supabase_service_role_key() -> Option<String> {
-    env::var("CAESIM_SUPABASE_SERVICE_ROLE_KEY")
+    env::var("SUPABASE_SECRET_KEY")
+        .or_else(|_| env::var("CAESIM_SUPABASE_SERVICE_ROLE_KEY"))
         .or_else(|_| env::var("SUPABASE_SERVICE_ROLE_KEY"))
         .or_else(|_| env::var("SUPABASE_SERVICE_KEY"))
-        .or_else(|_| env::var("SUPABASE_SECRET_KEY"))
         .ok()
 }
 
