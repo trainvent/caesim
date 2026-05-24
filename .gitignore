@@ -13,3 +13,4 @@ debian/*.ddeb
 debian/*.substvars
 debian/debhelper-build-stamp
 debian/files
+.env
