@@ -16,16 +16,16 @@ psql "$(supabase db connection-string)" -f supabase/migrations/001_credit_tables
 
 See `supabase/functions/credit-gateway/README.md` for deployment and local testing instructions. Make sure to set the following secrets in your project:
 
-- `SUPABASE_SECRET_KEY` (service role) — used by the gateway to mutate rows
-- `SUPABASE_KEY` (publishable) — used by the gateway to validate user sessions
-- `CAESIM_CREDIT_ADMIN_TOKEN` — admin token for grant operations
+- `SERVICE_ROLE_KEY` (service role) — used by the gateway to mutate rows
+- `PUBLISHABLE_KEY` (publishable) — used by the gateway to validate user sessions
+- `CREDIT_ADMIN_TOKEN` — admin token for grant operations
 
 3) Configure client CLI
 
 Locally, set the gateway URL so the CLI uses it for balance/consume operations:
 
 ```bash
-export CAESIM_CREDIT_GATEWAY_URL="https://<project>.functions.supabase.co/credit-gateway"
+export CREDIT_GATEWAY_URL="https://<project>.functions.supabase.co/credit-gateway"
 ```
 
 4) Create test user & obtain session token
@@ -39,7 +39,7 @@ Balance:
 
 ```bash
 SESSION_TOKEN=$(jq -r .session_token ~/.config/caesim/session.json)
-GATEWAY_URL=${CAESIM_CREDIT_GATEWAY_URL}
+GATEWAY_URL=${CREDIT_GATEWAY_URL}
 
 curl -X POST "$GATEWAY_URL" \
   -H "Authorization: Bearer $SESSION_TOKEN" \
@@ -60,14 +60,14 @@ Grant (admin):
 
 ```bash
 curl -X POST "$GATEWAY_URL" \
-  -H "x-caesim-admin-token: $CAESIM_CREDIT_ADMIN_TOKEN" \
+  -H "x-caesim-admin-token: $CREDIT_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action":"grant","user_id":"<uuid>","email":"user@example.com","amount":100}' | jq
 ```
 
 6) Run CLI flow
 
-With `CAESIM_CREDIT_GATEWAY_URL` set, the CLI will automatically use the gateway for balance checks and consume operations.
+With `CREDIT_GATEWAY_URL` set, the CLI will automatically use the gateway for balance checks and consume operations.
 
 ```bash
 caesim login --email test@example.com --otp

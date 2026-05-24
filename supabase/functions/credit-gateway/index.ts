@@ -43,37 +43,17 @@ function jsonResponse(status: number, body: Record<string, unknown>) {
 }
 
 function getPublishableKey(): string {
-  const direct = Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_KEY");
+  const direct = Deno.env.get("PUBLISHABLE_KEY");
   if (direct) return direct;
 
-  const json = Deno.env.get("SUPABASE_PUBLISHABLE_KEYS");
-  if (json) {
-    try {
-      const parsed = JSON.parse(json) as Record<string, string>;
-      if (parsed.default) return parsed.default;
-    } catch {
-      // ignore and fall through
-    }
-  }
-
-  throw new Error("missing Supabase publishable key: set SUPABASE_ANON_KEY, SUPABASE_KEY, or SUPABASE_PUBLISHABLE_KEYS");
+  throw new Error("missing Supabase publishable key: set PUBLISHABLE_KEY");
 }
 
 function getServiceRoleKey(): string {
-  const direct = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? Deno.env.get("SUPABASE_SECRET_KEY");
+  const direct = Deno.env.get("SERVICE_ROLE_KEY");
   if (direct) return direct;
 
-  const json = Deno.env.get("SUPABASE_SECRET_KEYS");
-  if (json) {
-    try {
-      const parsed = JSON.parse(json) as Record<string, string>;
-      if (parsed.default) return parsed.default;
-    } catch {
-      // ignore and fall through
-    }
-  }
-
-  throw new Error("missing Supabase service key: set SUPABASE_SERVICE_ROLE_KEY, SUPABASE_SECRET_KEY, or SUPABASE_SECRET_KEYS");
+  throw new Error("missing Supabase service key: set SERVICE_ROLE_KEY");
 }
 
 function getProjectUrl(): string {
@@ -202,9 +182,9 @@ Deno.serve(async (request) => {
 
     if (action === "grant") {
       const adminToken = getAdminToken(request);
-      const expectedAdminToken = Deno.env.get("CAESIM_CREDIT_ADMIN_TOKEN");
+      const expectedAdminToken = Deno.env.get("CREDIT_ADMIN_TOKEN");
       if (!expectedAdminToken) {
-        throw new Error("missing CAESIM_CREDIT_ADMIN_TOKEN");
+        throw new Error("missing CREDIT_ADMIN_TOKEN");
       }
       if (adminToken !== expectedAdminToken) {
         return jsonResponse(403, { error: "forbidden" });

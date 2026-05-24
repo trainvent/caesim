@@ -53,25 +53,15 @@ pub struct MeResponse {
 }
 
 pub fn default_supabase_url() -> Result<String> {
-    env::var("CAESIM_SUPABASE_URL")
-        .or_else(|_| env::var("SUPABASE_URL"))
-        .context("CAESIM_SUPABASE_URL or SUPABASE_URL environment variable not set")
+    env::var("PROJECT_URL").context("PROJECT_URL environment variable not set")
 }
 
 pub fn default_supabase_anon_key() -> Result<String> {
-    env::var("CAESIM_SUPABASE_ANON_KEY")
-    .or_else(|_| env::var("CAESIM_SUPABASE_KEY"))
-        .or_else(|_| env::var("SUPABASE_ANON_KEY"))
-    .or_else(|_| env::var("SUPABASE_KEY"))
-    .context("CAESIM_SUPABASE_ANON_KEY, CAESIM_SUPABASE_KEY, SUPABASE_ANON_KEY, or SUPABASE_KEY environment variable not set")
+    env::var("PUBLISHABLE_KEY").context("PUBLISHABLE_KEY environment variable not set")
 }
 
 pub fn default_supabase_service_role_key() -> Option<String> {
-    env::var("SUPABASE_SECRET_KEY")
-        .or_else(|_| env::var("CAESIM_SUPABASE_SERVICE_ROLE_KEY"))
-        .or_else(|_| env::var("SUPABASE_SERVICE_ROLE_KEY"))
-        .or_else(|_| env::var("SUPABASE_SERVICE_KEY"))
-        .ok()
+    env::var("SERVICE_ROLE_KEY").ok()
 }
 
 pub fn session_path() -> Result<PathBuf> {
@@ -255,7 +245,7 @@ pub async fn sync_public_user_row(
     credit_balance: i64,
 ) -> Result<()> {
     let service_role_key = default_supabase_service_role_key()
-        .ok_or_else(|| anyhow!("CAESIM_SUPABASE_SERVICE_ROLE_KEY, SUPABASE_SERVICE_ROLE_KEY, or SUPABASE_SERVICE_KEY environment variable not set"))?;
+        .ok_or_else(|| anyhow!("SERVICE_ROLE_KEY environment variable not set"))?;
 
     let now = unix_ts();
     let existing = fetch_public_user_row(base_url, &service_role_key, user_id).await?;
@@ -375,12 +365,15 @@ pub async fn fetch_me(base_url: &str, anon_key: &str, user_id: &str, session_tok
         .to_string();
 
     // If a credit gateway URL is configured, prefer it for an authoritative balance.
-    let credit_balance = match std::env::var("CAESIM_CREDIT_GATEWAY_URL") {
-        Ok(gw) => match gateway_balance(&gw, &session_token).await {
+    let credit_gateway = std::env::var("CREDIT_GATEWAY_URL").ok();
+
+    let credit_balance = if let Some(gw) = credit_gateway.as_deref() {
+        match gateway_balance(gw, &session_token).await {
             Ok(b) => b,
             Err(_) => credit_balance, // fallback to table or metadata on error
-        },
-        Err(_) => credit_balance,
+        }
+    } else {
+        credit_balance
     };
 
     Ok(MeResponse {
@@ -473,7 +466,7 @@ pub async fn consume_credits(base_url: &str, anon_key: &str, user_id: &str, sess
     }
 
     // If a credit gateway is configured, delegate consumption to it.
-    if let Ok(gw) = std::env::var("CAESIM_CREDIT_GATEWAY_URL") {
+    if let Some(gw) = std::env::var("CREDIT_GATEWAY_URL").ok() {
         let new_balance = gateway_consume(&gw, session_token, amount_credits).await?;
         return Ok(new_balance);
     }

@@ -62,19 +62,19 @@ else
 fi
 
 if [ "$SET_SECRETS" -eq 1 ]; then
-  SERVICE_KEY="${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}"
-  PUBLISHABLE_KEY="${SUPABASE_KEY:-${SUPABASE_ANON_KEY:-}}"
-  ADMIN_TOKEN="${CAESIM_CREDIT_ADMIN_TOKEN:-}"
+  SERVICE_KEY="${SERVICE_ROLE_KEY:-}"
+  PUBLISHABLE_KEY="${PUBLISHABLE_KEY:-}"
+  ADMIN_TOKEN="${CREDIT_ADMIN_TOKEN:-}"
 
   # Prompt securely for missing values in interactive terminals.
   if [[ -t 0 && -z "$SERVICE_KEY" ]]; then
-    prompt_hidden SERVICE_KEY "Service role key (SUPABASE_SECRET_KEY): "
+    prompt_hidden SERVICE_KEY "Service role key (SERVICE_ROLE_KEY): "
   fi
   if [[ -t 0 && -z "$PUBLISHABLE_KEY" ]]; then
-    prompt_hidden PUBLISHABLE_KEY "Publishable key (SUPABASE_KEY): "
+    prompt_hidden PUBLISHABLE_KEY "Publishable key (PUBLISHABLE_KEY): "
   fi
   if [[ -t 0 && -z "$ADMIN_TOKEN" ]]; then
-    prompt_hidden ADMIN_TOKEN "Credit admin token (CAESIM_CREDIT_ADMIN_TOKEN): "
+    prompt_hidden ADMIN_TOKEN "Credit admin token (CREDIT_ADMIN_TOKEN): "
   fi
 
   if [ -z "$SERVICE_KEY" ] || [ -z "$PUBLISHABLE_KEY" ] || [ -z "$ADMIN_TOKEN" ]; then
@@ -85,9 +85,9 @@ if [ "$SET_SECRETS" -eq 1 ]; then
 
   echo "Setting secrets in Supabase service..."
   if [ -n "$PROJECT_REF" ]; then
-    supabase secrets set --project-ref "$PROJECT_REF" SUPABASE_SECRET_KEY="$SERVICE_KEY" SUPABASE_KEY="$PUBLISHABLE_KEY" CAESIM_CREDIT_ADMIN_TOKEN="$ADMIN_TOKEN"
+    supabase secrets set --project-ref "$PROJECT_REF" SERVICE_ROLE_KEY="$SERVICE_KEY" PUBLISHABLE_KEY="$PUBLISHABLE_KEY" CREDIT_ADMIN_TOKEN="$ADMIN_TOKEN"
   else
-    supabase secrets set SUPABASE_SECRET_KEY="$SERVICE_KEY" SUPABASE_KEY="$PUBLISHABLE_KEY" CAESIM_CREDIT_ADMIN_TOKEN="$ADMIN_TOKEN"
+    supabase secrets set SERVICE_ROLE_KEY="$SERVICE_KEY" PUBLISHABLE_KEY="$PUBLISHABLE_KEY" CREDIT_ADMIN_TOKEN="$ADMIN_TOKEN"
   fi
 else
   echo "Skipping secrets update (--no-secrets)."
@@ -99,4 +99,4 @@ else
   echo "Deployment complete. Verify the function at: $(supabase functions list | grep credit-gateway || true)"
 fi
 
-echo "Remember to set CAESIM_CREDIT_GATEWAY_URL in your environment to the function URL."
+echo "Remember to set CREDIT_GATEWAY_URL in your environment to the function URL."
