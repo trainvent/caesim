@@ -1,10 +1,17 @@
+declare const Deno: {
+  env: {
+    get(name: string): string | undefined;
+  };
+  serve(handler: (request: Request) => Response | Promise<Response>): void;
+};
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-caesim-admin-token",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-type Action = "balance" | "consume" | "grant";
+type Action = "balance" | "consume" | "grant" | "payment";
 
 type BalanceRequest = {
   action?: Action;
@@ -12,6 +19,15 @@ type BalanceRequest = {
   user_id?: string;
   email?: string;
   reason?: string;
+  provider?: string;
+  provider_event_id?: string;
+  currency?: string;
+  credits_granted?: number;
+  status?: string;
+  metadata?: Record<string, unknown>;
+  stripe_customer_id?: string;
+  stripe_checkout_session_id?: string;
+  stripe_payment_intent_id?: string;
 };
 
 type SupabaseUser = {
@@ -30,6 +46,26 @@ type UserRow = {
   last_seen_at?: number;
   account_status?: string;
   credit_balance?: number;
+  stripe_customer_id?: string;
+  billing_email?: string;
+  billing_status?: string;
+};
+
+type RpcCreditChangeRow = {
+  user_id?: string;
+  credit_balance?: number;
+  balance_before?: number;
+  balance_after?: number;
+  ledger_id?: number;
+};
+
+type RpcPaymentEventRow = {
+  payment_event_id?: number;
+  user_id?: string;
+  credit_balance?: number | null;
+  balance_before?: number | null;
+  balance_after?: number | null;
+  ledger_id?: number | null;
 };
 
 function jsonResponse(status: number, body: Record<string, unknown>) {
@@ -45,14 +81,12 @@ function jsonResponse(status: number, body: Record<string, unknown>) {
 function getPublishableKey(): string {
   const direct = Deno.env.get("PUBLISHABLE_KEY");
   if (direct) return direct;
-
   throw new Error("missing Supabase publishable key: set PUBLISHABLE_KEY");
 }
 
 function getServiceRoleKey(): string {
   const direct = Deno.env.get("SERVICE_ROLE_KEY");
   if (direct) return direct;
-
   throw new Error("missing Supabase service key: set SERVICE_ROLE_KEY");
 }
 
@@ -130,28 +164,6 @@ async function fetchUserRow(serviceKey: string, userId: string): Promise<UserRow
   return rows[0] ?? null;
 }
 
-async function upsertUserRow(serviceKey: string, row: Record<string, unknown>): Promise<UserRow> {
-  const projectUrl = getProjectUrl();
-  const response = await fetch(`${projectUrl}/rest/v1/users?on_conflict=id`, {
-    method: "POST",
-    headers: {
-      apikey: serviceKey,
-      Authorization: `Bearer ${serviceKey}`,
-      "Content-Type": "application/json",
-      Prefer: "resolution=merge-duplicates,return=representation",
-    },
-    body: JSON.stringify(row),
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`user row upsert failed: ${response.status} ${errorText}`);
-  }
-
-  const rows = await response.json() as UserRow[];
-  return rows[0] ?? row as UserRow;
-}
-
 function requireAmount(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
     throw new Error("amount must be a positive integer");
@@ -159,7 +171,38 @@ function requireAmount(value: unknown): number {
   return value;
 }
 
-Deno.serve(async (request) => {
+async function callRpc<T>(serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
+  const projectUrl = getProjectUrl();
+  const response = await fetch(`${projectUrl}/rest/v1/rpc/${functionName}`, {
+    method: "POST",
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`${functionName} rpc failed: ${response.status} ${errorText}`);
+  }
+
+  return await response.json() as T[];
+}
+
+async function applyCreditChange(serviceKey: string, body: Record<string, unknown>): Promise<RpcCreditChangeRow> {
+  const rows = await callRpc<RpcCreditChangeRow>(serviceKey, "apply_credit_change", body);
+  return rows[0] ?? {};
+}
+
+async function recordPaymentEvent(serviceKey: string, body: Record<string, unknown>): Promise<RpcPaymentEventRow> {
+  const rows = await callRpc<RpcPaymentEventRow>(serviceKey, "record_payment_event", body);
+  return rows[0] ?? {};
+}
+
+Deno.serve(async (request: Request) => {
   if (request.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -180,7 +223,7 @@ Deno.serve(async (request) => {
   try {
     const serviceKey = getServiceRoleKey();
 
-    if (action === "grant") {
+    if (action === "grant" || action === "payment") {
       const adminToken = getAdminToken(request);
       const expectedAdminToken = Deno.env.get("CREDIT_ADMIN_TOKEN");
       if (!expectedAdminToken) {
@@ -192,35 +235,74 @@ Deno.serve(async (request) => {
 
       const userId = payload.user_id?.trim();
       if (!userId) {
-        return jsonResponse(400, { error: "user_id is required for grant" });
+        return jsonResponse(400, { error: "user_id is required" });
       }
 
-      const amount = requireAmount(payload.amount);
       const row = await fetchUserRow(serviceKey, userId).catch(() => null);
-      const currentBalance = typeof row?.credit_balance === "number" ? row.credit_balance : 0;
-      const nextBalance = currentBalance + amount;
-      const email = (payload.email?.trim() || row?.email || "").toLowerCase();
-      if (!email) {
-        return jsonResponse(400, { error: "email is required when creating a new user row" });
-      }
-      const now = Math.floor(Date.now() / 1000);
 
-      const saved = await upsertUserRow(serviceKey, {
-        id: userId,
-        email,
-        auth_provider: row?.auth_provider ?? "email",
-        plan: row?.plan ?? "beta",
-        created_at: row?.created_at ?? now,
-        last_seen_at: now,
-        account_status: row?.account_status ?? "active",
-        credit_balance: nextBalance,
+      if (action === "grant") {
+        const amount = requireAmount(payload.amount);
+        const email = payload.email?.trim() || row?.email || null;
+        const billingEmail = payload.email?.trim() || row?.billing_email || row?.email || null;
+        const saved = await applyCreditChange(serviceKey, {
+          p_user_id: userId,
+          p_delta: amount,
+          p_reason: payload.reason ?? "admin grant",
+          p_source: "admin",
+          p_source_ref: "credit-gateway:grant",
+          p_metadata: payload.metadata ?? {},
+          p_email: email,
+          p_auth_provider: row?.auth_provider ?? "email",
+          p_plan: row?.plan ?? "beta",
+          p_account_status: row?.account_status ?? "active",
+          p_stripe_customer_id: payload.stripe_customer_id ?? row?.stripe_customer_id ?? null,
+          p_billing_email: billingEmail,
+          p_billing_status: "active",
+        });
+
+        return jsonResponse(200, {
+          ok: true,
+          action,
+          user_id: userId,
+          credit_balance: saved.credit_balance ?? amount,
+          balance_before: saved.balance_before,
+          balance_after: saved.balance_after,
+          ledger_id: saved.ledger_id,
+        });
+      }
+
+      const amountCents = requireAmount(payload.amount);
+      const creditsGranted = requireAmount(payload.credits_granted ?? amountCents);
+      const provider = (payload.provider?.trim() || "stripe").toLowerCase();
+      const providerEventId = payload.provider_event_id?.trim();
+      if (!providerEventId) {
+        return jsonResponse(400, { error: "provider_event_id is required for payment" });
+      }
+
+      const saved = await recordPaymentEvent(serviceKey, {
+        p_provider: provider,
+        p_provider_event_id: providerEventId,
+        p_user_id: userId,
+        p_amount_cents: amountCents,
+        p_currency: (payload.currency?.trim() || "usd").toLowerCase(),
+        p_credits_granted: creditsGranted,
+        p_status: payload.status?.trim() || "succeeded",
+        p_metadata: payload.metadata ?? {},
+        p_email: payload.email?.trim() || row?.billing_email || row?.email || null,
+        p_stripe_customer_id: payload.stripe_customer_id ?? row?.stripe_customer_id ?? null,
+        p_stripe_checkout_session_id: payload.stripe_checkout_session_id ?? null,
+        p_stripe_payment_intent_id: payload.stripe_payment_intent_id ?? null,
       });
 
       return jsonResponse(200, {
         ok: true,
         action,
+        payment_event_id: saved.payment_event_id,
         user_id: userId,
-        credit_balance: saved.credit_balance ?? nextBalance,
+        credit_balance: saved.credit_balance,
+        balance_before: saved.balance_before,
+        balance_after: saved.balance_after,
+        ledger_id: saved.ledger_id,
       });
     }
 
@@ -251,26 +333,31 @@ Deno.serve(async (request) => {
       });
     }
 
-    const nextBalance = currentBalance - amount;
-    const email = pickUserEmail(row ?? undefined, user).toLowerCase();
-    const now = Math.floor(Date.now() / 1000);
-
-    const saved = await upsertUserRow(serviceKey, {
-      id: user.id,
-      email,
-      auth_provider: row?.auth_provider ?? "email",
-      plan: row?.plan ?? "beta",
-      created_at: row?.created_at ?? now,
-      last_seen_at: now,
-      account_status: row?.account_status ?? "active",
-      credit_balance: nextBalance,
+    const email = pickUserEmail(row ?? undefined, user).trim();
+    const saved = await applyCreditChange(serviceKey, {
+      p_user_id: user.id,
+      p_delta: -amount,
+      p_reason: payload.reason ?? "credit consume",
+      p_source: "consume",
+      p_source_ref: "credit-gateway:consume",
+      p_metadata: payload.metadata ?? {},
+      p_email: email || null,
+      p_auth_provider: row?.auth_provider ?? "email",
+      p_plan: row?.plan ?? "beta",
+      p_account_status: row?.account_status ?? "active",
+      p_stripe_customer_id: row?.stripe_customer_id ?? null,
+      p_billing_email: row?.billing_email ?? (email || null),
+      p_billing_status: row?.billing_status ?? null,
     });
 
     return jsonResponse(200, {
       ok: true,
       action,
       user_id: user.id,
-      credit_balance: saved.credit_balance ?? nextBalance,
+      credit_balance: saved.credit_balance,
+      balance_before: saved.balance_before,
+      balance_after: saved.balance_after,
+      ledger_id: saved.ledger_id,
     });
   } catch (error) {
     return jsonResponse(500, {

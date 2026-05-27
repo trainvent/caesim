@@ -97,6 +97,17 @@ caesim logout
 
 `caesim ai-assist` starts an interactive assistant that turns cleanup requests into safe `caesim cut` commands.
 
+## Payments
+
+The Supabase schema now includes a Stripe-ready payment foundation:
+
+- `public.users` carries billing metadata such as `stripe_customer_id`.
+- `public.credit_ledger` records every credit delta with source metadata.
+- `public.payment_events` stores idempotent payment events for later webhook replay.
+- The credit gateway exposes an admin-only `payment` action so a future Stripe webhook can reuse the same mutation path.
+
+See [supabase/README.md](supabase/README.md) and [supabase/functions/credit-gateway/README.md](supabase/functions/credit-gateway/README.md) for the request shape.
+
 ## Version Bumps
 
 To bump the release version in one step, run:

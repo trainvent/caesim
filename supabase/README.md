@@ -20,6 +20,14 @@ See `supabase/functions/credit-gateway/README.md` for deployment and local testi
 - `PUBLISHABLE_KEY` (publishable) — used by the gateway to validate user sessions
 - `CREDIT_ADMIN_TOKEN` — admin token for grant operations
 
+The payment foundation is also prepared here:
+
+- `public.users` stores `stripe_customer_id`, billing status, and balance metadata.
+- `public.credit_ledger` keeps an append-only audit trail for every credit delta.
+- `public.payment_events` records Stripe-ready payment events so a webhook can replay safely later.
+- `public.apply_credit_change(...)` is the atomic database helper the gateway uses for grants and consumes.
+- `public.record_payment_event(...)` is the Stripe-ready entry point for a future verified webhook.
+
 3) Configure client CLI
 
 Locally, set the gateway URL so the CLI uses it for balance/consume operations:
@@ -63,6 +71,15 @@ curl -X POST "$GATEWAY_URL" \
   -H "x-caesim-admin-token: $CREDIT_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action":"grant","user_id":"<uuid>","email":"user@example.com","amount":100}' | jq
+```
+
+Stripe-ready payment event:
+
+```bash
+curl -X POST "$GATEWAY_URL" \
+  -H "x-caesim-admin-token: $CREDIT_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"payment","provider":"stripe","provider_event_id":"evt_123","user_id":"<uuid>","amount":2000,"credits_granted":100,"currency":"usd","status":"succeeded"}' | jq
 ```
 
 6) Run CLI flow
