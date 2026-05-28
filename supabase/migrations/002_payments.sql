@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS public.payment_events (
 
 ALTER TABLE public.payment_events ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS select_own_payment_events ON public.payment_events;
 CREATE POLICY select_own_payment_events ON public.payment_events
   FOR SELECT
   USING (auth.uid()::text = user_id::text);

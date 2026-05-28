@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS public.users (
 -- Row-level security: allow authenticated users to read their own row only.
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS select_own ON public.users;
 CREATE POLICY select_own ON public.users
   FOR SELECT
   USING (auth.uid()::text = id::text);
@@ -34,6 +35,7 @@ CREATE TABLE IF NOT EXISTS public.credit_ledger (
 
 ALTER TABLE public.credit_ledger ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS select_ledger_owner ON public.credit_ledger;
 CREATE POLICY select_ledger_owner ON public.credit_ledger
   FOR SELECT
   USING (auth.uid()::text = user_id::text);

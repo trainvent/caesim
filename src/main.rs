@@ -290,13 +290,6 @@ async fn complete_otp_session(
     }
     eprintln!("Session saved locally.");
 
-    if auth::default_supabase_service_role_key().is_some() {
-        let profile = auth::fetch_me(supabase_url, supabase_key, &session.user_id, &session.session_token).await?;
-        auth::sync_public_user_row(supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
-    } else {
-        eprintln!("Public user row provisioning is handled by the database trigger; set SERVICE_ROLE_KEY only if you want Caesim to refresh the public users row immediately.");
-    }
-
     let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
     if set_now.trim().is_empty() || matches!(set_now.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         let new_password = prompt_password("New password: ")?;
@@ -375,12 +368,6 @@ fn run_login(args: LoginArgs) -> Result<()> {
                 eprintln!("Signed in as {} ({})", session.email, session.user_id);
                 eprintln!("Session saved locally.");
 
-                if auth::default_supabase_service_role_key().is_some() {
-                    let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
-                    auth::sync_public_user_row(&supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
-                } else {
-                    eprintln!("Public user table sync skipped: set SERVICE_ROLE_KEY only if you want Caesim to create/update the public users row.");
-                }
                 Ok(())
             }
             Err(err) => Err(anyhow!(
