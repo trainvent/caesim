@@ -294,7 +294,7 @@ async fn complete_otp_session(
         let profile = auth::fetch_me(supabase_url, supabase_key, &session.user_id, &session.session_token).await?;
         auth::sync_public_user_row(supabase_url, &session.user_id, &session.email, profile.credit_balance).await?;
     } else {
-        eprintln!("Public user table sync skipped: set SERVICE_ROLE_KEY only if you want Caesim to create/update the public users row.");
+        eprintln!("Public user row provisioning is handled by the database trigger; set SERVICE_ROLE_KEY only if you want Caesim to refresh the public users row immediately.");
     }
 
     let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
@@ -491,6 +491,9 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
         let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        if !session.email.trim().eq_ignore_ascii_case("service@trainvent.com") {
+            return Err(anyhow!("credits console access is restricted to service@trainvent.com"));
+        }
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
 

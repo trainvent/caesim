@@ -9,6 +9,8 @@ Use psql or the Supabase SQL editor to run the migration:
 ```bash
 # from repo root
 psql "$(supabase db connection-string)" -f supabase/migrations/001_credit_tables.sql
+psql "$(supabase db connection-string)" -f supabase/migrations/002_payments.sql
+psql "$(supabase db connection-string)" -f supabase/migrations/003_auth_user_row_trigger.sql
 # or paste the SQL into the Supabase SQL editor
 ```
 

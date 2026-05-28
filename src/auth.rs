@@ -442,6 +442,37 @@ async fn gateway_consume(gateway_url: &str, session_token: &str, amount: i64) ->
     Ok(bal)
 }
 
+async fn gateway_grant(gateway_url: &str, admin_token: &str, user_id: &str, email: &str, amount: i64) -> Result<i64> {
+    let client = Client::new();
+    let resp = client
+        .post(gateway_url)
+        .header("Content-Type", "application/json")
+        .header("x-caesim-admin-token", admin_token)
+        .json(&serde_json::json!({
+            "action": "grant",
+            "user_id": user_id,
+            "email": email,
+            "amount": amount,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("failed to contact credit gateway at {}", gateway_url))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(anyhow!("credit gateway returned {}: {}", status, body));
+    }
+
+    let json: Value = serde_json::from_str(&body).context("failed to parse credit gateway response")?;
+    let bal = json
+        .get("credit_balance")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| anyhow!("credit gateway did not include credit_balance"))?;
+    Ok(bal)
+}
+
 pub async fn add_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
     if amount_credits <= 0 {
         return Err(anyhow!("amount must be greater than 0"));
@@ -452,6 +483,14 @@ pub async fn add_credits(base_url: &str, anon_key: &str, user_id: &str, session_
         return Err(anyhow!(
             "credit top-ups are only enabled for basic@trainvent.com during testing"
         ));
+    }
+
+    // Prefer the gateway grant path so top-ups are recorded in credit_ledger.
+    if let Some(gw) = std::env::var("CREDIT_GATEWAY_URL").ok() {
+        let admin_token = std::env::var("CREDIT_ADMIN_TOKEN")
+            .context("CREDIT_ADMIN_TOKEN must be set to use gateway-backed credit grants")?;
+        let new_balance = gateway_grant(&gw, &admin_token, user_id, &me.email, amount_credits).await?;
+        return Ok(new_balance);
     }
 
     let current = me.credit_balance;
@@ -756,7 +795,7 @@ fn extract_integer_metadata(user_json: &Value, key: &str) -> Option<i64> {
 }
 
 fn is_test_credit_account(email: &str) -> bool {
-    email.trim().eq_ignore_ascii_case("basic@trainvent.com")
+    email.trim().eq_ignore_ascii_case("service@trainvent.com")
 }
 
 #[derive(Debug)]
