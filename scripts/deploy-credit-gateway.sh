@@ -63,27 +63,23 @@ fi
 
 if [ "$SET_SECRETS" -eq 1 ]; then
   SERVICE_KEY="${SERVICE_ROLE_KEY:-}"
-  SUPABASE_URL="${SUPABASE_URL:-${PROJECT_URL:-}}"
 
   # Prompt securely for missing values in interactive terminals.
   if [[ -t 0 && -z "$SERVICE_KEY" ]]; then
     prompt_hidden SERVICE_KEY "Service role key (SERVICE_ROLE_KEY): "
   fi
-  if [[ -t 0 && -z "$SUPABASE_URL" ]]; then
-    read -r -p "Supabase URL (SUPABASE_URL): " SUPABASE_URL
-  fi
 
-  if [ -z "$SERVICE_KEY" ] || [ -z "$SUPABASE_URL" ]; then
-    echo "Skipping config update: missing SERVICE_ROLE_KEY or SUPABASE_URL."
+  if [ -z "$SERVICE_KEY" ]; then
+    echo "Skipping config update: missing SERVICE_ROLE_KEY."
     echo "Provide values via env vars, --env-file, or interactive prompt; or use --no-secrets."
     exit 1
   fi
 
   echo "Setting gateway config in Supabase service..."
   if [ -n "$PROJECT_REF" ]; then
-    supabase secrets set --project-ref "$PROJECT_REF" SERVICE_ROLE_KEY="$SERVICE_KEY" SUPABASE_URL="$SUPABASE_URL"
+    supabase secrets set --project-ref "$PROJECT_REF" SERVICE_ROLE_KEY="$SERVICE_KEY"
   else
-    supabase secrets set SERVICE_ROLE_KEY="$SERVICE_KEY" SUPABASE_URL="$SUPABASE_URL"
+    supabase secrets set SERVICE_ROLE_KEY="$SERVICE_KEY"
   fi
 else
   echo "Skipping secrets update (--no-secrets)."

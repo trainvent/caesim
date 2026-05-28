@@ -84,12 +84,29 @@ function getServiceRoleKey(): string {
   throw new Error("missing Supabase service key: set SERVICE_ROLE_KEY");
 }
 
-function getProjectUrl(): string {
-  const url = Deno.env.get("SUPABASE_URL");
-  if (!url) {
-    throw new Error("missing SUPABASE_URL");
+function deriveProjectUrlFromRequest(request: Request): string | null {
+  const url = new URL(request.url);
+  const host = url.hostname;
+
+  if (host.endsWith(".functions.supabase.co")) {
+    return `https://${host.replace(/\.functions\.supabase\.co$/, ".supabase.co")}`;
   }
-  return url.replace(/\/$/, "");
+
+  return null;
+}
+
+function getProjectUrl(request?: Request): string {
+  const direct = Deno.env.get("SUPABASE_URL");
+  if (direct) {
+    return direct.replace(/\/$/, "");
+  }
+
+  if (request) {
+    const derived = deriveProjectUrlFromRequest(request);
+    if (derived) return derived;
+  }
+
+  throw new Error("missing SUPABASE_URL (or run the function on a Supabase *.functions.supabase.co host)");
 }
 
 function getBearerToken(request: Request): string {
@@ -114,7 +131,7 @@ function pickUserEmail(row: UserRow | undefined, user: SupabaseUser): string {
 }
 
 async function getAuthenticatedUser(request: Request): Promise<SupabaseUser> {
-  const projectUrl = getProjectUrl();
+  const projectUrl = getProjectUrl(request);
   const serviceKey = getServiceRoleKey();
   const token = getBearerToken(request);
 
@@ -133,8 +150,8 @@ async function getAuthenticatedUser(request: Request): Promise<SupabaseUser> {
   return await response.json() as SupabaseUser;
 }
 
-async function fetchUserRow(serviceKey: string, userId: string): Promise<UserRow | null> {
-  const projectUrl = getProjectUrl();
+async function fetchUserRow(projectUrl: string, serviceKey: string, userId: string): Promise<UserRow | null> {
+async function fetchUserRow(projectUrl: string, serviceKey: string, userId: string): Promise<UserRow | null> {
   const response = await fetch(
     `${projectUrl}/rest/v1/users?select=*&id=eq.${encodeURIComponent(userId)}&limit=1`,
     {
@@ -161,8 +178,8 @@ function requireAmount(value: unknown): number {
   return value;
 }
 
-async function callRpc<T>(serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
-  const projectUrl = getProjectUrl();
+async function callRpc<T>(projectUrl: string, serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
+async function callRpc<T>(projectUrl: string, serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
   const response = await fetch(`${projectUrl}/rest/v1/rpc/${functionName}`, {
     method: "POST",
     headers: {
@@ -182,13 +199,15 @@ async function callRpc<T>(serviceKey: string, functionName: string, body: Record
   return await response.json() as T[];
 }
 
-async function applyCreditChange(serviceKey: string, body: Record<string, unknown>): Promise<RpcCreditChangeRow> {
-  const rows = await callRpc<RpcCreditChangeRow>(serviceKey, "apply_credit_change", body);
+async function applyCreditChange(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcCreditChangeRow> {
+async function applyCreditChange(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcCreditChangeRow> {
+  const rows = await callRpc<RpcCreditChangeRow>(projectUrl, serviceKey, "apply_credit_change", body);
   return rows[0] ?? {};
 }
 
-async function recordPaymentEvent(serviceKey: string, body: Record<string, unknown>): Promise<RpcPaymentEventRow> {
-  const rows = await callRpc<RpcPaymentEventRow>(serviceKey, "record_payment_event", body);
+async function recordPaymentEvent(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcPaymentEventRow> {
+async function recordPaymentEvent(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcPaymentEventRow> {
+  const rows = await callRpc<RpcPaymentEventRow>(projectUrl, serviceKey, "record_payment_event", body);
   return rows[0] ?? {};
 }
 
@@ -212,21 +231,19 @@ Deno.serve(async (request: Request) => {
 
   try {
     const serviceKey = getServiceRoleKey();
+    const projectUrl = getProjectUrl(request);
 
     if (action === "grant" || action === "payment") {
-      // Admin authentication: only allow a request authenticated as the
-      // privileged service account email (defaulting to service@trainvent.com).
       const defaultAdminEmail = Deno.env.get("CREDIT_ADMIN_EMAIL") ?? "service@trainvent.com";
       let isAdmin = false;
 
-      // Try authenticating the bearer token and check for the configured
-      // admin email or a is_admin flag in user metadata.
       try {
         const user = await getAuthenticatedUser(request).catch(() => null);
-        if (user && user.email) {
+        if (user?.email) {
           if (user.email.toLowerCase() === defaultAdminEmail.toLowerCase()) {
             isAdmin = true;
           }
+
           const meta = (user.user_metadata ?? user.raw_user_meta_data) as Record<string, unknown> | undefined;
           if (!isAdmin && meta && meta["is_admin"] === true) {
             isAdmin = true;
@@ -245,13 +262,13 @@ Deno.serve(async (request: Request) => {
         return jsonResponse(400, { error: "user_id is required" });
       }
 
-      const row = await fetchUserRow(serviceKey, userId).catch(() => null);
+      const row = await fetchUserRow(projectUrl, serviceKey, userId).catch(() => null);
 
       if (action === "grant") {
         const amount = requireAmount(payload.amount);
         const email = payload.email?.trim() || row?.email || null;
         const billingEmail = payload.email?.trim() || row?.billing_email || row?.email || null;
-        const saved = await applyCreditChange(serviceKey, {
+        const saved = await applyCreditChange(projectUrl, serviceKey, {
           p_user_id: userId,
           p_delta: amount,
           p_reason: payload.reason ?? "admin grant",
@@ -286,7 +303,7 @@ Deno.serve(async (request: Request) => {
         return jsonResponse(400, { error: "provider_event_id is required for payment" });
       }
 
-      const saved = await recordPaymentEvent(serviceKey, {
+      const saved = await recordPaymentEvent(projectUrl, serviceKey, {
         p_provider: provider,
         p_provider_event_id: providerEventId,
         p_user_id: userId,
@@ -314,7 +331,7 @@ Deno.serve(async (request: Request) => {
     }
 
     const user = await getAuthenticatedUser(request);
-    const row = await fetchUserRow(serviceKey, user.id).catch(() => null);
+    const row = await fetchUserRow(projectUrl, serviceKey, user.id).catch(() => null);
     const currentBalance = extractBalance(row ?? undefined, user);
 
     if (action === "balance") {
@@ -341,7 +358,7 @@ Deno.serve(async (request: Request) => {
     }
 
     const email = pickUserEmail(row ?? undefined, user).trim();
-    const saved = await applyCreditChange(serviceKey, {
+    const saved = await applyCreditChange(projectUrl, serviceKey, {
       p_user_id: user.id,
       p_delta: -amount,
       p_reason: payload.reason ?? "credit consume",

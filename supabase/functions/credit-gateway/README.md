@@ -9,8 +9,11 @@ transactional database functions for credit mutations.
 
 Required environment variables (set in Supabase dashboard or local .env):
 
+- SERVICE_ROLE_KEY (service role) — required for credit mutation RPCs and auth lookups in production
+
+Optional for local testing only:
+
 - SUPABASE_URL: https://<project>.supabase.co
-- SERVICE_ROLE_KEY (service role) — required for credit mutation RPCs and auth lookups
 
 Deploying
 
@@ -29,10 +32,10 @@ supabase link --project-ref <your-project-ref>
 supabase functions deploy credit-gateway --no-verify
 ```
 
-3. Set the cloud config in the Supabase dashboard or via the CLI. Only the service-role key is sensitive; the project URL can be copied from your `.env` file:
+3. Set the cloud config in the Supabase dashboard or via the CLI. Only the service-role key is required in production:
 
 ```bash
-supabase secrets set SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" SUPABASE_URL="$PROJECT_URL"
+supabase secrets set SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY"
 ```
 
 Local testing
@@ -90,6 +93,6 @@ curl -s -X POST "$GATEWAY_URL" \
 
 Notes
 
-- The function expects the Supabase service-role key to call transactional RPCs and auth lookups. Never embed this key in the client.
+- The function expects the Supabase service-role key to call transactional RPCs and auth lookups in production. Never embed this key in the client.
 - The CLI delegates balance and consume operations to this gateway when `CREDIT_GATEWAY_URL` is set.
 - Deploy and secrets management should be done using Supabase's dashboard or the CLI secrets management.

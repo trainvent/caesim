@@ -18,8 +18,9 @@ psql "$(supabase db connection-string)" -f supabase/migrations/003_auth_user_row
 
 See `supabase/functions/credit-gateway/README.md` for deployment and local testing instructions. Make sure to set the following cloud config in your project:
 
-- `SERVICE_ROLE_KEY` (service role) — used by the gateway to mutate rows and validate user sessions
-- `SUPABASE_URL` — the project URL; copy it from your `.env` file or Supabase project settings
+- `SERVICE_ROLE_KEY` (service role) — used by the gateway to mutate rows and validate user sessions in production
+
+`SUPABASE_URL` is optional for local testing only; the deployed function derives the project URL from the Supabase function host.
 
 The payment foundation is also prepared here:
 
