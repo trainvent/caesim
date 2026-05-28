@@ -16,11 +16,10 @@ psql "$(supabase db connection-string)" -f supabase/migrations/003_auth_user_row
 
 2) Deploy the credit gateway function
 
-See `supabase/functions/credit-gateway/README.md` for deployment and local testing instructions. Make sure to set the following secrets in your project:
+See `supabase/functions/credit-gateway/README.md` for deployment and local testing instructions. Make sure to set the following cloud config in your project:
 
-- `SERVICE_ROLE_KEY` (service role) — used by the gateway to mutate rows
-- `PUBLISHABLE_KEY` (publishable) — used by the gateway to validate user sessions
-- `CREDIT_ADMIN_TOKEN` — admin token for grant operations
+- `SERVICE_ROLE_KEY` (service role) — used by the gateway to mutate rows and validate user sessions
+- `SUPABASE_URL` — the project URL; copy it from your `.env` file or Supabase project settings
 
 The payment foundation is also prepared here:
 
@@ -70,7 +69,7 @@ Grant (admin):
 
 ```bash
 curl -X POST "$GATEWAY_URL" \
-  -H "x-caesim-admin-token: $CREDIT_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action":"grant","user_id":"<uuid>","email":"user@example.com","amount":100}' | jq
 ```
@@ -79,7 +78,7 @@ Stripe-ready payment event:
 
 ```bash
 curl -X POST "$GATEWAY_URL" \
-  -H "x-caesim-admin-token: $CREDIT_ADMIN_TOKEN" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"action":"payment","provider":"stripe","provider_event_id":"evt_123","user_id":"<uuid>","amount":2000,"credits_granted":100,"currency":"usd","status":"succeeded"}' | jq
 ```

@@ -78,12 +78,6 @@ function jsonResponse(status: number, body: Record<string, unknown>) {
   });
 }
 
-function getPublishableKey(): string {
-  const direct = Deno.env.get("PUBLISHABLE_KEY");
-  if (direct) return direct;
-  throw new Error("missing Supabase publishable key: set PUBLISHABLE_KEY");
-}
-
 function getServiceRoleKey(): string {
   const direct = Deno.env.get("SERVICE_ROLE_KEY");
   if (direct) return direct;
@@ -107,10 +101,6 @@ function getBearerToken(request: Request): string {
   return token;
 }
 
-function getAdminToken(request: Request): string | null {
-  return request.headers.get("x-caesim-admin-token");
-}
-
 function extractBalance(row: UserRow | undefined, user: SupabaseUser): number {
   if (typeof row?.credit_balance === "number") return row.credit_balance;
 
@@ -125,12 +115,12 @@ function pickUserEmail(row: UserRow | undefined, user: SupabaseUser): string {
 
 async function getAuthenticatedUser(request: Request): Promise<SupabaseUser> {
   const projectUrl = getProjectUrl();
-  const publishableKey = getPublishableKey();
+  const serviceKey = getServiceRoleKey();
   const token = getBearerToken(request);
 
   const response = await fetch(`${projectUrl}/auth/v1/user`, {
     headers: {
-      apikey: publishableKey,
+      apikey: serviceKey,
       Authorization: `Bearer ${token}`,
     },
   });
@@ -224,12 +214,29 @@ Deno.serve(async (request: Request) => {
     const serviceKey = getServiceRoleKey();
 
     if (action === "grant" || action === "payment") {
-      const adminToken = getAdminToken(request);
-      const expectedAdminToken = Deno.env.get("CREDIT_ADMIN_TOKEN");
-      if (!expectedAdminToken) {
-        throw new Error("missing CREDIT_ADMIN_TOKEN");
+      // Admin authentication: only allow a request authenticated as the
+      // privileged service account email (defaulting to service@trainvent.com).
+      const defaultAdminEmail = Deno.env.get("CREDIT_ADMIN_EMAIL") ?? "service@trainvent.com";
+      let isAdmin = false;
+
+      // Try authenticating the bearer token and check for the configured
+      // admin email or a is_admin flag in user metadata.
+      try {
+        const user = await getAuthenticatedUser(request).catch(() => null);
+        if (user && user.email) {
+          if (user.email.toLowerCase() === defaultAdminEmail.toLowerCase()) {
+            isAdmin = true;
+          }
+          const meta = (user.user_metadata ?? user.raw_user_meta_data) as Record<string, unknown> | undefined;
+          if (!isAdmin && meta && meta["is_admin"] === true) {
+            isAdmin = true;
+          }
+        }
+      } catch {
+        // fall through to forbidden
       }
-      if (adminToken !== expectedAdminToken) {
+
+      if (!isAdmin) {
         return jsonResponse(403, { error: "forbidden" });
       }
 

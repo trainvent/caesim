@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # deploy-credit-gateway.sh
-# Deploys the Supabase Edge Function 'credit-gateway' and sets required secrets.
+# Deploys the Supabase Edge Function 'credit-gateway' and sets required config.
 # Usage:
 #   ./scripts/deploy-credit-gateway.sh [--project-ref <ref>] [--env-file .env] [--no-secrets]
 #
 # Secure-first behavior:
 # - Does not require a .env file.
-# - Reads secrets from current shell env, optional env-file, or hidden prompt.
+# - Reads config from current shell env, optional env-file, or hidden prompt.
 
 ENV_FILE=""
 PROJECT_REF=""
@@ -63,31 +63,27 @@ fi
 
 if [ "$SET_SECRETS" -eq 1 ]; then
   SERVICE_KEY="${SERVICE_ROLE_KEY:-}"
-  PUBLISHABLE_KEY="${PUBLISHABLE_KEY:-}"
-  ADMIN_TOKEN="${CREDIT_ADMIN_TOKEN:-}"
+  SUPABASE_URL="${SUPABASE_URL:-${PROJECT_URL:-}}"
 
   # Prompt securely for missing values in interactive terminals.
   if [[ -t 0 && -z "$SERVICE_KEY" ]]; then
     prompt_hidden SERVICE_KEY "Service role key (SERVICE_ROLE_KEY): "
   fi
-  if [[ -t 0 && -z "$PUBLISHABLE_KEY" ]]; then
-    prompt_hidden PUBLISHABLE_KEY "Publishable key (PUBLISHABLE_KEY): "
-  fi
-  if [[ -t 0 && -z "$ADMIN_TOKEN" ]]; then
-    prompt_hidden ADMIN_TOKEN "Credit admin token (CREDIT_ADMIN_TOKEN): "
+  if [[ -t 0 && -z "$SUPABASE_URL" ]]; then
+    read -r -p "Supabase URL (SUPABASE_URL): " SUPABASE_URL
   fi
 
-  if [ -z "$SERVICE_KEY" ] || [ -z "$PUBLISHABLE_KEY" ] || [ -z "$ADMIN_TOKEN" ]; then
-    echo "Skipping secrets update: missing one or more secret values."
+  if [ -z "$SERVICE_KEY" ] || [ -z "$SUPABASE_URL" ]; then
+    echo "Skipping config update: missing SERVICE_ROLE_KEY or SUPABASE_URL."
     echo "Provide values via env vars, --env-file, or interactive prompt; or use --no-secrets."
     exit 1
   fi
 
-  echo "Setting secrets in Supabase service..."
+  echo "Setting gateway config in Supabase service..."
   if [ -n "$PROJECT_REF" ]; then
-    supabase secrets set --project-ref "$PROJECT_REF" SERVICE_ROLE_KEY="$SERVICE_KEY" PUBLISHABLE_KEY="$PUBLISHABLE_KEY" CREDIT_ADMIN_TOKEN="$ADMIN_TOKEN"
+    supabase secrets set --project-ref "$PROJECT_REF" SERVICE_ROLE_KEY="$SERVICE_KEY" SUPABASE_URL="$SUPABASE_URL"
   else
-    supabase secrets set SERVICE_ROLE_KEY="$SERVICE_KEY" PUBLISHABLE_KEY="$PUBLISHABLE_KEY" CREDIT_ADMIN_TOKEN="$ADMIN_TOKEN"
+    supabase secrets set SERVICE_ROLE_KEY="$SERVICE_KEY" SUPABASE_URL="$SUPABASE_URL"
   fi
 else
   echo "Skipping secrets update (--no-secrets)."
