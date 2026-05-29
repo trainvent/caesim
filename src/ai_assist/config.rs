@@ -37,7 +37,11 @@ impl AssistantConfig {
 pub fn default_api_key() -> Result<String> {
     std::env::var("BACKBOARD_API_KEY_CAESIM")
         .or_else(|_| std::env::var("BACKBOARD_API_KEY"))
-        .map_err(|_| anyhow::anyhow!("BACKBOARD_API_KEY_CAESIM environment variable not set"))
+        .map_err(|_| anyhow::anyhow!("BACKBOARD_API_KEY_CAESIM or BACKBOARD_API_KEY environment variable not set"))
+}
+
+pub fn default_gateway_url() -> Option<String> {
+    std::env::var("BACKBOARD_GATEWAY_URL").ok()
 }
 
 fn default_system_prompt(assistant_name: &str) -> String {

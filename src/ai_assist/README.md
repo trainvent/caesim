@@ -4,7 +4,8 @@ ai_assist module
 This module contains a small client that calls Backboard's assistant endpoint.
 
 Configuration (via env):
-- `BACKBOARD_API_KEY_CAESIM` : API key (required at runtime)
+- `BACKBOARD_API_KEY_CAESIM` or `BACKBOARD_API_KEY` : API key (required at runtime)
+- `BACKBOARD_GATEWAY_URL` : optional Supabase proxy URL; when set, CLI sends ai-assist requests via Edge Function and does not require local Backboard API keys
 - `BACKBOARD_API_NAME` : assistant name (default: `caesim`)
 - `BACKBOARD_API_BASE` : API base URL (default: `https://app.backboard.io/api`)
 - `BACKBOARD_ASSISTANT_ID` : optional assistant UUID to pin chats to a saved assistant

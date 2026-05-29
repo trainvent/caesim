@@ -22,6 +22,22 @@ See `supabase/functions/credit-gateway/README.md` for deployment and local testi
 
 `SUPABASE_URL` is optional for local testing only; the deployed function derives the project URL from the Supabase function host.
 
+2b) Deploy the AI assist gateway function (for production Backboard key handling)
+
+See `supabase/functions/ai-assist-gateway/README.md` for details.
+
+Set these Supabase function secrets:
+
+- `SERVICE_ROLE_KEY` (service role)
+- `BACKBOARD_API_KEY_CAESIM` (or `BACKBOARD_API_KEY`)
+
+Deploy:
+
+```bash
+supabase functions deploy ai-assist-gateway --no-verify-jwt
+supabase secrets set SERVICE_ROLE_KEY="$SERVICE_ROLE_KEY" BACKBOARD_API_KEY_CAESIM="$BACKBOARD_API_KEY_CAESIM"
+```
+
 The payment foundation is also prepared here:
 
 - `public.users` stores `stripe_customer_id`, billing status, and balance metadata.
@@ -36,6 +52,7 @@ Locally, set the gateway URL so the CLI uses it for balance/consume operations:
 
 ```bash
 export CREDIT_GATEWAY_URL="https://<project>.functions.supabase.co/credit-gateway"
+export BACKBOARD_GATEWAY_URL="https://<project>.functions.supabase.co/ai-assist-gateway"
 ```
 
 4) Create test user & obtain session token

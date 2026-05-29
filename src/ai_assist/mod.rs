@@ -4,7 +4,7 @@ use serde_json::Value;
 use reqwest::Client;
 
 mod config;
-pub use config::{default_api_key, AssistantConfig};
+pub use config::{default_api_key, default_gateway_url, AssistantConfig};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct AssistRequest {
@@ -53,6 +53,37 @@ pub async fn interact(api_key: &str, user_text: &str, thread_id: Option<String>)
         .send()
         .await
         .map_err(|e| anyhow::anyhow!("failed to send assistant request to {}: {}", url, e))?;
+
+    parse_assist_response(resp).await
+}
+
+pub async fn interact_via_gateway(gateway_url: &str, session_token: &str, user_text: &str, thread_id: Option<String>) -> Result<AssistResponse> {
+    let cfg = AssistantConfig::load_from_env()?;
+
+    let req = AssistRequest {
+        content: user_text.to_string(),
+        assistant_id: cfg.assistant_id.clone(),
+        thread_id: thread_id.or(cfg.thread_id.clone()),
+        system_prompt: cfg.system_prompt.clone(),
+        json_output: true,
+        memory: "Auto".to_string(),
+    };
+
+    let client = Client::new();
+    let url = gateway_url.trim_end_matches('/').to_string();
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", session_token))
+        .header("Accept", "application/json")
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to send assistant request to {}: {}", url, e))?;
+
+    parse_assist_response(resp).await
+}
+
+async fn parse_assist_response(resp: reqwest::Response) -> Result<AssistResponse> {
 
     let status = resp.status();
     let body = resp.text().await.unwrap_or_default();

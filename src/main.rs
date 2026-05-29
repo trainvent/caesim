@@ -1037,11 +1037,16 @@ fn run_assist() -> Result<()> {
     eprintln!("Describe what you'd like to do with your image library.");
     eprintln!("(Type 'help' for examples, or 'quit' to exit)\n");
 
-    let api_key = ai_assist::default_api_key()?;
+    let gateway_url = ai_assist::default_gateway_url();
+    let api_key = if gateway_url.is_some() {
+        None
+    } else {
+        Some(ai_assist::default_api_key()?)
+    };
     let mut session = auth::load_session()?.ok_or_else(|| anyhow!("ai-assist requires a local session; run `caesim login` first"))?;
     let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
     let supabase_key = auth::default_supabase_anon_key()?;
-    runtime.block_on(auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session))?;
+    auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
     let mut thread_id: Option<String> = std::env::var("BACKBOARD_THREAD_ID").ok();
 
     loop {
@@ -1071,6 +1076,7 @@ fn run_assist() -> Result<()> {
             continue;
         }
 
+        auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
         let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
         if me.credit_balance < 1 {
             return Err(anyhow!(
@@ -1083,7 +1089,13 @@ fn run_assist() -> Result<()> {
         let new_balance = auth::consume_credits(&supabase_url, &supabase_key, &session.user_id, &session.session_token, 1).await?;
         eprintln!("Toy credits: charged 1 credit; new balance is {}.", new_balance);
 
-        match ai_assist::interact(&api_key, input, thread_id.clone()).await {
+        let assist_result = if let Some(gw) = gateway_url.as_deref() {
+            ai_assist::interact_via_gateway(gw, &session.session_token, input, thread_id.clone()).await
+        } else {
+            ai_assist::interact(api_key.as_deref().ok_or_else(|| anyhow!("BACKBOARD_API_KEY_CAESIM or BACKBOARD_API_KEY environment variable not set"))?, input, thread_id.clone()).await
+        };
+
+        match assist_result {
             Ok(response) => {
                 if let Some(new_thread_id) = response.thread_id.as_ref() {
                     eprintln!("Thread: {}", new_thread_id);
