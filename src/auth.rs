@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -11,6 +12,8 @@ pub struct StoredSession {
     pub user_id: String,
     pub email: String,
     pub session_token: String,
+    #[serde(default)]
+    pub refresh_token: Option<String>,
     pub expires_at: i64,
     pub saved_at: i64,
 }
@@ -25,6 +28,7 @@ pub struct VerifyResponse {
     pub user_id: String,
     pub email: String,
     pub session_token: String,
+    pub refresh_token: Option<String>,
     pub expires_at: i64,
 }
 
@@ -33,6 +37,7 @@ pub struct PasswordLoginResponse {
     pub user_id: String,
     pub email: String,
     pub session_token: String,
+    pub refresh_token: Option<String>,
     pub expires_at: i64,
 }
 
@@ -146,6 +151,7 @@ pub async fn start_login(base_url: &str, anon_key: &str, email: &str) -> Result<
 pub async fn verify_login(base_url: &str, anon_key: &str, email: &str, verification_code: &str) -> Result<VerifyResponse> {
     let json = supabase_verify_otp(base_url, anon_key, email, verification_code).await?;
     let session_token = extract_access_token(&json)?;
+    let refresh_token = extract_refresh_token(&json).ok();
     let user = json
         .get("user")
         .cloned()
@@ -162,12 +168,13 @@ pub async fn verify_login(base_url: &str, anon_key: &str, email: &str, verificat
         .map(str::to_string)
         .unwrap_or_else(|| email.trim().to_ascii_lowercase());
 
-    let expires_at = unix_ts() + 30 * 24 * 60 * 60;
+    let expires_at = jwt_expiry(&session_token).unwrap_or_else(|| unix_ts() + 30 * 24 * 60 * 60);
 
     Ok(VerifyResponse {
         user_id,
         email,
         session_token,
+        refresh_token,
         expires_at,
     })
 }
@@ -205,6 +212,7 @@ pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, pa
     let json: Value = serde_json::from_str(&body)
         .context("failed to parse password login response")?;
     let session_token = extract_access_token(&json)?;
+    let refresh_token = extract_refresh_token(&json).ok();
     let user = json
         .get("user")
         .cloned()
@@ -221,12 +229,64 @@ pub async fn login_with_password(base_url: &str, anon_key: &str, email: &str, pa
         .map(str::to_string)
         .unwrap_or_else(|| email.trim().to_ascii_lowercase());
 
-    let expires_at = unix_ts() + 30 * 24 * 60 * 60;
+    let expires_at = jwt_expiry(&session_token).unwrap_or_else(|| unix_ts() + 30 * 24 * 60 * 60);
 
     Ok(PasswordLoginResponse {
         user_id,
         email: user_email,
         session_token,
+        refresh_token,
+        expires_at,
+    })
+}
+
+pub async fn refresh_login(base_url: &str, anon_key: &str, refresh_token: &str) -> Result<VerifyResponse> {
+    let url = format!("{}/auth/v1/token?grant_type=refresh_token", normalize_base_url(base_url));
+    let client = Client::new();
+    let resp = client
+        .post(&url)
+        .header("apikey", anon_key)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "refresh_token": refresh_token,
+        }))
+        .send()
+        .await
+        .with_context(|| format!("failed to send refresh request to {url}"))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("refresh request failed with {}: {}", status, body));
+    }
+
+    let json: Value = serde_json::from_str(&body)
+        .context("failed to parse refresh response")?;
+    let session_token = extract_access_token(&json)?;
+    let refresh_token = extract_refresh_token(&json).ok();
+    let user = json
+        .get("user")
+        .cloned()
+        .ok_or_else(|| anyhow!("Supabase response did not include a user"))?;
+
+    let user_id = user
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("Supabase response did not include a user id"))?
+        .to_string();
+    let email = user
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_default();
+
+    let expires_at = jwt_expiry(&session_token).unwrap_or_else(|| unix_ts() + 30 * 24 * 60 * 60);
+
+    Ok(VerifyResponse {
+        user_id,
+        email,
+        session_token,
+        refresh_token,
         expires_at,
     })
 }
@@ -658,6 +718,53 @@ fn extract_access_token(json: &Value) -> Result<String> {
                 .map(str::to_string)
         })
         .ok_or_else(|| anyhow!("Supabase response did not include an access token"))
+}
+
+fn extract_refresh_token(json: &Value) -> Result<String> {
+    json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            json.get("session")
+                .and_then(|s| s.get("refresh_token"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow!("Supabase response did not include a refresh token"))
+}
+
+pub async fn ensure_session_fresh(base_url: &str, anon_key: &str, session: &mut StoredSession) -> Result<()> {
+    let token_expiry = jwt_expiry(&session.session_token).unwrap_or(session.expires_at);
+    if token_expiry > unix_ts() + 60 {
+        return Ok(());
+    }
+
+    let refresh_token = session
+        .refresh_token
+        .as_deref()
+        .ok_or_else(|| anyhow!("session expired; run `caesim login` again to create a refreshable session"))?;
+
+    let refreshed = refresh_login(base_url, anon_key, refresh_token).await?;
+    session.user_id = refreshed.user_id;
+    session.email = refreshed.email;
+    session.session_token = refreshed.session_token;
+    session.refresh_token = refreshed.refresh_token;
+    session.expires_at = refreshed.expires_at;
+    session.saved_at = unix_ts();
+    save_session(session)?;
+    Ok(())
+}
+
+fn jwt_expiry(token: &str) -> Option<i64> {
+    let mut parts = token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let _signature = parts.next()?;
+
+    let decoded = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let json: Value = serde_json::from_slice(&decoded).ok()?;
+    json.get("exp").and_then(|v| v.as_i64())
 }
 
 async fn set_credit_balance(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, credit_balance: i64) -> Result<()> {

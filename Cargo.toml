@@ -21,6 +21,7 @@ dotenvy = "0.15"
 rpassword = "=7.3.1"
 url = "=2.4.1"
 indexmap = "=2.10.0"
+base64 = "0.22"
 
 [dev-dependencies]
 version-sync = "0.9"

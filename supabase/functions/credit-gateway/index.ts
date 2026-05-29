@@ -151,7 +151,6 @@ async function getAuthenticatedUser(request: Request): Promise<SupabaseUser> {
 }
 
 async function fetchUserRow(projectUrl: string, serviceKey: string, userId: string): Promise<UserRow | null> {
-async function fetchUserRow(projectUrl: string, serviceKey: string, userId: string): Promise<UserRow | null> {
   const response = await fetch(
     `${projectUrl}/rest/v1/users?select=*&id=eq.${encodeURIComponent(userId)}&limit=1`,
     {
@@ -179,7 +178,6 @@ function requireAmount(value: unknown): number {
 }
 
 async function callRpc<T>(projectUrl: string, serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
-async function callRpc<T>(projectUrl: string, serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
   const response = await fetch(`${projectUrl}/rest/v1/rpc/${functionName}`, {
     method: "POST",
     headers: {
@@ -200,12 +198,10 @@ async function callRpc<T>(projectUrl: string, serviceKey: string, functionName: 
 }
 
 async function applyCreditChange(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcCreditChangeRow> {
-async function applyCreditChange(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcCreditChangeRow> {
   const rows = await callRpc<RpcCreditChangeRow>(projectUrl, serviceKey, "apply_credit_change", body);
   return rows[0] ?? {};
 }
 
-async function recordPaymentEvent(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcPaymentEventRow> {
 async function recordPaymentEvent(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcPaymentEventRow> {
   const rows = await callRpc<RpcPaymentEventRow>(projectUrl, serviceKey, "record_payment_event", body);
   return rows[0] ?? {};

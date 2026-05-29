@@ -279,6 +279,7 @@ async fn complete_otp_session(
         user_id: session.user_id.clone(),
         email: session.email.clone(),
         session_token: session.session_token.clone(),
+        refresh_token: session.refresh_token.clone(),
         expires_at: session.expires_at,
         saved_at: current_unix_ts(),
     })?;
@@ -361,6 +362,7 @@ fn run_login(args: LoginArgs) -> Result<()> {
                     user_id: session.user_id.clone(),
                     email: session.email.clone(),
                     session_token: session.session_token.clone(),
+                    refresh_token: session.refresh_token.clone(),
                     expires_at: session.expires_at,
                     saved_at: current_unix_ts(),
                 })?;
@@ -381,9 +383,10 @@ fn run_login(args: LoginArgs) -> Result<()> {
 fn run_whoami() -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
-        let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
+        auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
         let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await;
 
         match me {
@@ -434,9 +437,10 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
             return Ok(());
         }
 
-        let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
+        auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
 
         let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
 
@@ -477,12 +481,13 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
 fn run_credits(args: CreditsArgs) -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
-        let session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
         if !session.email.trim().eq_ignore_ascii_case("service@trainvent.com") {
             return Err(anyhow!("credits console access is restricted to service@trainvent.com"));
         }
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
+        auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
 
         match args.command {
             Some(CreditsCommand::Balance) | None => {
@@ -653,9 +658,10 @@ fn run_cut(args: CutArgs) -> Result<()> {
 
     if vision_enabled {
         let runtime = Runtime::new().context("failed to create async runtime for credit checks")?;
-        let session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
+        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
+        runtime.block_on(auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session))?;
         let me = runtime.block_on(auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token))?;
         let cost = estimate_vision_credit_cost(images.len());
 
@@ -1032,9 +1038,10 @@ fn run_assist() -> Result<()> {
     eprintln!("(Type 'help' for examples, or 'quit' to exit)\n");
 
     let api_key = ai_assist::default_api_key()?;
-    let session = auth::load_session()?.ok_or_else(|| anyhow!("ai-assist requires a local session; run `caesim login` first"))?;
+    let mut session = auth::load_session()?.ok_or_else(|| anyhow!("ai-assist requires a local session; run `caesim login` first"))?;
     let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
     let supabase_key = auth::default_supabase_anon_key()?;
+    runtime.block_on(auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session))?;
     let mut thread_id: Option<String> = std::env::var("BACKBOARD_THREAD_ID").ok();
 
     loop {

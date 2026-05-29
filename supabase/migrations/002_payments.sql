@@ -131,7 +131,7 @@ BEGIN
   SELECT *
   INTO v_row
   FROM public.users
-  WHERE id = p_user_id
+  WHERE id::text = p_user_id::text
   FOR UPDATE;
 
   v_before := COALESCE(v_row.credit_balance, 0);
@@ -153,7 +153,7 @@ BEGIN
     billing_email = COALESCE(NULLIF(btrim(p_billing_email), ''), billing_email),
     billing_status = COALESCE(NULLIF(btrim(p_billing_status), ''), billing_status),
     billing_updated_at = v_now
-  WHERE id = p_user_id
+  WHERE id::text = p_user_id::text
   RETURNING * INTO v_row;
 
   INSERT INTO public.credit_ledger (
