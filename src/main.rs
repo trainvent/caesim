@@ -483,7 +483,7 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
     runtime.block_on(async move {
         let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
         if !session.email.trim().eq_ignore_ascii_case("service@trainvent.com") {
-            return Err(anyhow!("credits console access is restricted to service@trainvent.com"));
+            return Err(anyhow!("payment processing is coming soon - contact support to get toy credits for testing"));
         }
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
