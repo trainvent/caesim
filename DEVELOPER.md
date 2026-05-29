@@ -205,7 +205,7 @@ Build a local `.deb` that can be installed with `apt`:
 ```bash
 sudo apt install debhelper cargo rustc pkg-config
 dpkg-buildpackage -b -us -uc
-sudo apt install ../caesim_0.1.0_amd64.deb
+sudo apt install ../caesim_0.1.9_amd64.deb
 ```
 
 If `cargo` and `rustc` come from rustup instead of apt, Debian's build-dependency check may still fail. In that case, use `dpkg-buildpackage -d` locally or build inside a Debian environment where those toolchains are installed as packages.
