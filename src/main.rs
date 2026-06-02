@@ -62,6 +62,10 @@ struct CutArgs {
     #[arg(long = "find", value_name = "LABEL")]
     find: Option<String>,
 
+    /// Charge account credits for a Vision run (disabled by default)
+    #[arg(long = "charge-vision-credits", default_value_t = false)]
+    charge_vision_credits: bool,
+
     /// Folder to move matched files into (defaults to <path>/cut)
     #[arg(long = "destination")]
     destination: Option<PathBuf>,
@@ -656,7 +660,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
     let mut vision_credit_user_id = None;
     let mut vision_credit_session_token = None;
 
-    if vision_enabled {
+    if vision_enabled && args.charge_vision_credits {
         let runtime = Runtime::new().context("failed to create async runtime for credit checks")?;
         let mut session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
@@ -681,6 +685,10 @@ fn run_cut(args: CutArgs) -> Result<()> {
         vision_credit_supabase_key = Some(supabase_key);
         vision_credit_user_id = Some(session.user_id);
         vision_credit_session_token = Some(session.session_token);
+    } else if vision_enabled {
+        eprintln!(
+            "Vision run credit charging is disabled (default). Use --charge-vision-credits to consume account credits."
+        );
     }
 
     // Optional: call python vision backend to get labels/safesearch/text/web/image properties.

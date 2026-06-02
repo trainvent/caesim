@@ -273,6 +273,12 @@ cargo run -- cut ./my-photos --rule duplicates --find --dry-run
 cargo run -- cut ./my-photos --find cars --dry-run
 ```
 
+By default, Vision runs do not consume account credits. To enable credit charging for a run, pass:
+
+```bash
+cargo run -- cut ./my-photos --find cars --charge-vision-credits
+```
+
 ### AI-assisted command creation (Backboard)
 
 Use **Backboard** to generate commands from natural language:

@@ -65,12 +65,12 @@ Useful options:
 
 ## Vision Mode
 
-Vision mode requires a local Caesim session, credits, Google credentials, and the Python Vision backend dependencies.
+Vision mode requires Google credentials and the Python Vision backend dependencies.
+Credit charging is now opt-in via `--charge-vision-credits`.
 
 ```bash
 caesim vision
-caesim login
-caesim credits balance
+caesim cut ./photos --find receipt --dry-run
 ```
 
 If needed, install the Python dependency:
@@ -80,6 +80,12 @@ pip install -r requirements.txt
 ```
 
 You can point Caesim at a custom backend with `CAESIM_VISION_BACKEND`.
+
+If you still want billing-style credit deduction for a run, add:
+
+```bash
+caesim cut ./photos --find receipt --charge-vision-credits
+```
 
 ## Accounts and AI Assist
 
