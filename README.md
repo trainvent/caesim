@@ -69,7 +69,7 @@ Vision mode requires Google credentials and the Python Vision backend dependenci
 Credit charging is now opt-in via `--charge-vision-credits`.
 
 ```bash
-caesim vision
+cargo run -- settings vision
 caesim cut ./photos --find receipt --dry-run
 ```
 
@@ -79,7 +79,14 @@ If needed, install the Python dependency:
 pip install -r requirements.txt
 ```
 
-You can point Caesim at a custom backend with `CAESIM_VISION_BACKEND`.
+You can point Caesim at a custom local backend with `CAESIM_VISION_BACKEND`.
+To use the Cloud Run Vision function instead, set `CAESIM_VISION_URL` to the
+function URL. If the function requires authentication, also set
+`CAESIM_VISION_BEARER_TOKEN`.
+
+The Cloud Run backend also includes an async GCS batch API for larger hosted
+runs. See [DEVELOPER.md](DEVELOPER.md) for the bucket env vars and status
+endpoint.
 
 If you still want billing-style credit deduction for a run, add:
 

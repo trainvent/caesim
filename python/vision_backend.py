@@ -1,7 +1,15 @@
+import base64
 import json
 import os
 import sys
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+
+ImageInput = Dict[str, Any]
+_VISION_CLIENT: Any = None
+_STORAGE_CLIENT: Any = None
 
 
 def main() -> int:
@@ -11,7 +19,7 @@ def main() -> int:
         return 2
 
     req = json.loads(payload.decode("utf-8"))
-    images: List[str] = req.get("images", [])
+    image_inputs = request_image_inputs(req)
     features: List[str] = req.get("features", [])
 
     # If google-cloud-vision isn't installed or credentials aren't configured,
@@ -22,7 +30,7 @@ def main() -> int:
         sys.stderr.write(
             f"google-cloud-vision not available ({e}); returning empty results\n"
         )
-        return write_response([empty_result(p) for p in images])
+        return write_response([empty_result(p["path"]) for p in image_inputs])
 
     try:
         transport = os.environ.get("CAESIM_VISION_TRANSPORT")
@@ -34,7 +42,7 @@ def main() -> int:
         sys.stderr.write(
             f"Vision client init failed (credentials?): {e}; returning empty results\n"
         )
-        return write_response([empty_result(p) for p in images])
+        return write_response([empty_result(p["path"]) for p in image_inputs])
 
     want_labels = "LABEL_DETECTION" in features
     want_safe = "SAFE_SEARCH_DETECTION" in features
@@ -42,10 +50,10 @@ def main() -> int:
     want_web = "WEB_DETECTION" in features
     want_properties = "IMAGE_PROPERTIES" in features
 
-    out = analyze_images(
+    out = analyze_image_inputs(
         client=client,
         vision=vision,
-        paths=images,
+        image_inputs=image_inputs,
         want_labels=want_labels,
         want_safe=want_safe,
         want_text=want_text,
@@ -67,11 +75,50 @@ def main() -> int:
     return write_response(out)
 
 
+def request_image_inputs(req: Dict[str, Any]) -> List[ImageInput]:
+    inputs: List[ImageInput] = []
+    for image in req.get("images", []):
+        if isinstance(image, str):
+            inputs.append({"path": image, "content": None})
+            continue
+        if isinstance(image, dict):
+            path = str(image.get("path") or "")
+            encoded = image.get("content_base64")
+            content = None
+            if isinstance(encoded, str) and encoded:
+                content = base64.b64decode(encoded)
+            inputs.append({"path": path, "content": content})
+    return inputs
+
+
 def analyze_images(
     *,
     client: Any,
     vision: Any,
     paths: List[str],
+    want_labels: bool,
+    want_safe: bool,
+    want_text: bool,
+    want_web: bool,
+    want_properties: bool,
+) -> List[Dict[str, Any]]:
+    return analyze_image_inputs(
+        client=client,
+        vision=vision,
+        image_inputs=[{"path": path, "content": None} for path in paths],
+        want_labels=want_labels,
+        want_safe=want_safe,
+        want_text=want_text,
+        want_web=want_web,
+        want_properties=want_properties,
+    )
+
+
+def analyze_image_inputs(
+    *,
+    client: Any,
+    vision: Any,
+    image_inputs: List[ImageInput],
     want_labels: bool,
     want_safe: bool,
     want_text: bool,
@@ -91,18 +138,20 @@ def analyze_images(
         features.append(vision.Feature(type_=vision.Feature.Type.IMAGE_PROPERTIES))
 
     if not features:
-        return [empty_result(path) for path in paths]
+        return [empty_result(image["path"]) for image in image_inputs]
 
     out: List[Dict[str, Any]] = []
     chunk_size = int(os.environ.get("CAESIM_VISION_CHUNK_SIZE", "8"))
     timeout = float(os.environ.get("CAESIM_VISION_TIMEOUT", "20"))
     chunk_size = max(1, chunk_size)
-    for start in range(0, len(paths), chunk_size):
-        chunk_paths = paths[start : start + chunk_size]
+    for start in range(0, len(image_inputs), chunk_size):
+        chunk_inputs = image_inputs[start : start + chunk_size]
         requests = []
         request_paths = []
-        for path in chunk_paths:
-            if not os.path.exists(path):
+        for image in chunk_inputs:
+            path = image["path"]
+            content = image.get("content")
+            if content is None and not os.path.exists(path):
                 out.append(empty_result(path))
                 continue
             if not is_google_vision_supported(path):
@@ -110,14 +159,15 @@ def analyze_images(
                 result["errors"].append("unsupported_by_google_vision")
                 out.append(result)
                 continue
-            try:
-                with open(path, "rb") as f:
-                    content = f.read()
-            except Exception as e:
-                result = empty_result(path)
-                result["errors"].append(f"read: {e}")
-                out.append(result)
-                continue
+            if content is None:
+                try:
+                    with open(path, "rb") as f:
+                        content = f.read()
+                except Exception as e:
+                    result = empty_result(path)
+                    result["errors"].append(f"read: {e}")
+                    out.append(result)
+                    continue
 
             requests.append(
                 vision.AnnotateImageRequest(
@@ -131,9 +181,9 @@ def analyze_images(
             continue
 
         try:
-            end = min(start + len(chunk_paths), len(paths))
+            end = min(start + len(chunk_inputs), len(image_inputs))
             sys.stderr.write(
-                f"Google Vision analyzing images {start + 1}-{end}/{len(paths)} "
+                f"Google Vision analyzing images {start + 1}-{end}/{len(image_inputs)} "
                 f"({len(requests)} request(s), timeout={timeout:g}s)\n"
             )
             sys.stderr.flush()
@@ -164,6 +214,296 @@ def analyze_images(
             )
 
     return out
+
+
+def vision_http(request: Any) -> Tuple[str, int, Dict[str, str]]:
+    try:
+        path = getattr(request, "path", "") or ""
+        method = getattr(request, "method", "POST")
+        if path == "/v1/analyze-batch" and method == "POST":
+            return start_async_batch(request)
+        if path.startswith("/v1/status/") and method == "GET":
+            return batch_status(request, path.rsplit("/", 1)[-1])
+
+        req = request.get_json(silent=True) or {}
+        image_inputs = request_image_inputs(req)
+        features: List[str] = req.get("features", [])
+
+        from google.cloud import vision  # type: ignore
+
+        client = vision_client(vision)
+
+        results = analyze_image_inputs(
+            client=client,
+            vision=vision,
+            image_inputs=image_inputs,
+            want_labels="LABEL_DETECTION" in features,
+            want_safe="SAFE_SEARCH_DETECTION" in features,
+            want_text="TEXT_DETECTION" in features
+            or "DOCUMENT_TEXT_DETECTION" in features,
+            want_web="WEB_DETECTION" in features,
+            want_properties="IMAGE_PROPERTIES" in features,
+        )
+        return (
+            json.dumps({"results": results}),
+            200,
+            {"Content-Type": "application/json"},
+        )
+    except Exception as e:
+        body = json.dumps({"error": str(e), "results": []})
+        return body, 500, {"Content-Type": "application/json"}
+
+
+def start_async_batch(request: Any) -> Tuple[str, int, Dict[str, str]]:
+    if not proxy_auth_ok(request):
+        return json_response({"error": "unauthorized"}, 401)
+
+    req = request.get_json(silent=True) or {}
+    customer_id = request_customer_id(request, req)
+    if not customer_id:
+        return json_response({"error": "customer_id is required"}, 400)
+
+    feature_names = req.get("features") or ["LABEL_DETECTION"]
+    if not isinstance(feature_names, list) or not feature_names:
+        return json_response({"error": "features must be a non-empty list"}, 400)
+
+    source_uris = validated_source_uris(req)
+    if not source_uris:
+        return json_response(
+            {"error": "provide image_uris or gcs_input_uri with supported GCS images"},
+            400,
+        )
+
+    input_bucket_name = required_env("INPUT_BUCKET_NAME")
+    output_bucket_name = required_env("OUTPUT_BUCKET_NAME")
+    batch_id = str(req.get("batch_id") or uuid.uuid4())
+    clean_customer = clean_path_part(customer_id)
+    clean_batch = clean_path_part(batch_id)
+
+    storage = storage_client()
+    processing_uris = copy_to_processing_bucket(
+        storage=storage,
+        source_uris=source_uris,
+        input_bucket_name=input_bucket_name,
+        prefix=f"{clean_customer}/{clean_batch}",
+    )
+
+    from google.cloud import vision  # type: ignore
+
+    client = vision_client(vision)
+    features = vision_features(vision, feature_names)
+    output_uri = f"gs://{output_bucket_name}/{clean_customer}/{clean_batch}/"
+    requests = [
+        vision.AsyncAnnotateImageRequest(
+            image=vision.Image(
+                source=vision.ImageSource(gcs_image_uri=processing_uri)
+            ),
+            features=features,
+        )
+        for processing_uri in processing_uris
+    ]
+    operation = client.async_batch_annotate_images(
+        requests=requests,
+        output_config=vision.OutputConfig(
+            gcs_destination=vision.GcsDestination(uri=output_uri),
+            batch_size=int(os.environ.get("CAESIM_VISION_OUTPUT_BATCH_SIZE", "50")),
+        ),
+    )
+
+    operation_name = getattr(getattr(operation, "operation", operation), "name", "")
+    manifest = {
+        "batch_id": batch_id,
+        "customer_id": customer_id,
+        "operation_name": operation_name,
+        "state": "submitted",
+        "features": feature_names,
+        "image_count": len(processing_uris),
+        "input_prefix": f"gs://{input_bucket_name}/{clean_customer}/{clean_batch}/",
+        "output_prefix": output_uri,
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_manifest(
+        storage=storage,
+        output_bucket_name=output_bucket_name,
+        name=f"{clean_customer}/{clean_batch}/job.json",
+        manifest=manifest,
+    )
+    return json_response(manifest, 202)
+
+
+def batch_status(request: Any, batch_id: str) -> Tuple[str, int, Dict[str, str]]:
+    if not proxy_auth_ok(request):
+        return json_response({"error": "unauthorized"}, 401)
+
+    customer_id = request.args.get("customer_id") if hasattr(request, "args") else None
+    if not customer_id:
+        return json_response({"error": "customer_id query parameter is required"}, 400)
+
+    output_bucket_name = required_env("OUTPUT_BUCKET_NAME")
+    clean_customer = clean_path_part(customer_id)
+    clean_batch = clean_path_part(batch_id)
+    prefix = f"{clean_customer}/{clean_batch}/"
+    bucket = storage_client().bucket(output_bucket_name)
+    blobs = list(bucket.list_blobs(prefix=prefix, max_results=100))
+    json_outputs = [
+        f"gs://{output_bucket_name}/{blob.name}"
+        for blob in blobs
+        if blob.name.endswith(".json") and not blob.name.endswith("/job.json")
+    ]
+    manifest_blob = bucket.blob(f"{prefix}job.json")
+    manifest = {}
+    if manifest_blob.exists():
+        manifest = json.loads(manifest_blob.download_as_text())
+
+    state = "complete" if json_outputs else "running"
+    if not manifest and not json_outputs:
+        state = "not_found"
+
+    return json_response(
+        {
+            "batch_id": batch_id,
+            "customer_id": customer_id,
+            "state": state,
+            "operation_name": manifest.get("operation_name"),
+            "output_prefix": f"gs://{output_bucket_name}/{prefix}",
+            "result_uris": json_outputs,
+            "image_count": manifest.get("image_count"),
+            "submitted_at": manifest.get("submitted_at"),
+        },
+        200 if state != "not_found" else 404,
+    )
+
+
+def proxy_auth_ok(request: Any) -> bool:
+    expected = os.environ.get("CAESIM_VISION_PROXY_TOKEN")
+    if not expected:
+        return True
+    auth_header = request.headers.get("Authorization", "")
+    return auth_header == f"Bearer {expected}"
+
+
+def request_customer_id(request: Any, req: Dict[str, Any]) -> str:
+    return str(req.get("customer_id") or request.headers.get("X-Customer-Id") or "")
+
+
+def validated_source_uris(req: Dict[str, Any]) -> List[str]:
+    uris = req.get("image_uris") or []
+    if not isinstance(uris, list):
+        uris = []
+    out = [uri for uri in uris if isinstance(uri, str) and is_supported_gcs_uri(uri)]
+
+    folder = req.get("gcs_input_uri")
+    if isinstance(folder, str) and folder.startswith("gs://"):
+        out.extend(list_supported_gcs_images(folder))
+
+    return sorted(set(out))
+
+
+def list_supported_gcs_images(folder_uri: str) -> List[str]:
+    bucket_name, prefix = parse_gcs_uri(folder_uri)
+    bucket = storage_client().bucket(bucket_name)
+    return [
+        f"gs://{bucket_name}/{blob.name}"
+        for blob in bucket.list_blobs(prefix=prefix)
+        if is_google_vision_supported(blob.name)
+    ]
+
+
+def copy_to_processing_bucket(
+    *,
+    storage: Any,
+    source_uris: List[str],
+    input_bucket_name: str,
+    prefix: str,
+) -> List[str]:
+    input_bucket = storage.bucket(input_bucket_name)
+    processing_uris = []
+    for index, source_uri in enumerate(source_uris):
+        source_bucket_name, source_name = parse_gcs_uri(source_uri)
+        source_bucket = storage.bucket(source_bucket_name)
+        source_blob = source_bucket.blob(source_name)
+        ext = os.path.splitext(source_name)[1].lower()
+        dest_name = f"{prefix}/{index:06d}{ext}"
+        source_bucket.copy_blob(source_blob, input_bucket, dest_name)
+        processing_uris.append(f"gs://{input_bucket_name}/{dest_name}")
+    return processing_uris
+
+
+def write_manifest(
+    *, storage: Any, output_bucket_name: str, name: str, manifest: Dict[str, Any]
+) -> None:
+    blob = storage.bucket(output_bucket_name).blob(name)
+    blob.upload_from_string(
+        json.dumps(manifest, sort_keys=True),
+        content_type="application/json",
+    )
+
+
+def vision_client(vision: Any) -> Any:
+    global _VISION_CLIENT
+    if _VISION_CLIENT is None:
+        transport = os.environ.get("CAESIM_VISION_TRANSPORT")
+        _VISION_CLIENT = (
+            vision.ImageAnnotatorClient(transport=transport)
+            if transport
+            else vision.ImageAnnotatorClient()
+        )
+    return _VISION_CLIENT
+
+
+def storage_client() -> Any:
+    global _STORAGE_CLIENT
+    if _STORAGE_CLIENT is None:
+        from google.cloud import storage  # type: ignore
+
+        _STORAGE_CLIENT = storage.Client()
+    return _STORAGE_CLIENT
+
+
+def vision_features(vision: Any, feature_names: List[str]) -> List[Any]:
+    features = []
+    for name in feature_names:
+        try:
+            feature_type = getattr(vision.Feature.Type, str(name))
+        except AttributeError:
+            raise ValueError(f"unsupported feature: {name}")
+        features.append(vision.Feature(type_=feature_type))
+    return features
+
+
+def required_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} environment variable is required")
+    return value
+
+
+def parse_gcs_uri(uri: str) -> Tuple[str, str]:
+    if not uri.startswith("gs://"):
+        raise ValueError(f"not a GCS URI: {uri}")
+    rest = uri[5:]
+    bucket, _, name = rest.partition("/")
+    if not bucket or not name:
+        raise ValueError(f"GCS URI must include bucket and object/prefix: {uri}")
+    return bucket, name
+
+
+def is_supported_gcs_uri(uri: str) -> bool:
+    if not uri.startswith("gs://"):
+        return False
+    try:
+        _, name = parse_gcs_uri(uri)
+    except ValueError:
+        return False
+    return is_google_vision_supported(name)
+
+
+def clean_path_part(value: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in value)[:120]
+
+
+def json_response(body: Dict[str, Any], status: int) -> Tuple[str, int, Dict[str, str]]:
+    return json.dumps(body), status, {"Content-Type": "application/json"}
 
 
 def response_to_result(

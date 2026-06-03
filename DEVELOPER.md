@@ -263,7 +263,9 @@ pip install -r requirements.txt
 
 **Configure Google credentials:**
 - Enable the Vision API in your GCP project.
-- Use Application Default Credentials (recommended) or set `GOOGLE_APPLICATION_CREDENTIALS`.
+- Run `cargo run -- settings vision`.
+- Select your Google account to configure Application Default Credentials, or select the Caesim-provided account once it is available.
+- You can also set `GOOGLE_APPLICATION_CREDENTIALS` directly.
 
 **Run with Vision enabled:**
 
@@ -272,6 +274,65 @@ cargo run -- cut ./my-photos --rule explicit --find safety --dry-run
 cargo run -- cut ./my-photos --rule duplicates --find --dry-run
 cargo run -- cut ./my-photos --find cars --dry-run
 ```
+
+**Cloud Run / Cloud Functions backend:**
+
+The same Python backend exposes an HTTP function entry point named
+`vision_http`. Deploy it as a Gen 2 function backed by Cloud Run:
+
+```bash
+gcloud functions deploy caesim-vision \
+  --gen2 \
+  --runtime=python312 \
+  --region=us-central1 \
+  --source=python \
+  --entry-point=vision_http \
+  --trigger-http \
+  --set-env-vars=INPUT_BUCKET_NAME=<processing-bucket>,OUTPUT_BUCKET_NAME=<results-bucket>
+```
+
+The root endpoint supports synchronous CLI requests. Point the CLI at the deployed endpoint:
+
+```bash
+export CAESIM_VISION_URL="https://<function-url>"
+```
+
+If the endpoint requires authentication, provide a bearer token too:
+
+```bash
+export CAESIM_VISION_BEARER_TOKEN="$(gcloud auth print-identity-token)"
+```
+
+For production-size hosted batches, use the async GCS API instead of the root
+sync endpoint:
+
+```bash
+curl -X POST "$CAESIM_VISION_URL/v1/analyze-batch" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CAESIM_VISION_PROXY_TOKEN" \
+  -d '{
+    "customer_id": "customer_123",
+    "features": ["LABEL_DETECTION", "TEXT_DETECTION"],
+    "gcs_input_uri": "gs://customer-upload-bucket/customer_123/incoming/"
+  }'
+```
+
+The service copies supported GCS images into
+`gs://$INPUT_BUCKET_NAME/{customer_id}/{batch_id}/`, starts
+`async_batch_annotate_images`, writes results to
+`gs://$OUTPUT_BUCKET_NAME/{customer_id}/{batch_id}/`, and immediately returns a
+`batch_id`.
+
+Check status with:
+
+```bash
+curl "$CAESIM_VISION_URL/v1/status/<batch_id>?customer_id=customer_123" \
+  -H "Authorization: Bearer $CAESIM_VISION_PROXY_TOKEN"
+```
+
+Set `CAESIM_VISION_PROXY_TOKEN` on the function if this endpoint is exposed
+publicly. Configure lifecycle rules on the processing and results buckets to
+delete raw images and JSON outputs after 24-48 hours.
 
 By default, Vision runs do not consume account credits. To enable credit charging for a run, pass:
 

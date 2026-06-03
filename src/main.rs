@@ -1,17 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 mod ai_assist;
 mod auth;
-use clap::{Parser, Subcommand};
-use std::env;
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use clap::{error::ErrorKind, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use walkdir::WalkDir;
 use tokio::runtime::Runtime;
+use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -31,7 +32,9 @@ enum Commands {
     /// AI assistant for generating caesim commands delivered by backboard.io
     #[command(name = "ai-assist")]
     AiAssist,
-    /// Configure and learn about Google Vision setup
+    /// Manage caesim settings
+    Settings(SettingsArgs),
+    /// Configure Google Vision setup
     Vision(VisionArgs),
     /// Create a local account session with one-time password signup
     #[command(alias = "register")]
@@ -86,8 +89,6 @@ struct CutArgs {
     /// Report JSON path (default: .caesim-report.json in target folder)
     #[arg(long)]
     report: Option<PathBuf>,
-
-
 }
 
 #[derive(Parser, Debug)]
@@ -95,6 +96,26 @@ struct VisionArgs {
     /// Optional: path to custom service account JSON file to use
     #[arg(long = "service-account-json")]
     service_account_json: Option<PathBuf>,
+
+    /// Use the current user's Google account via Application Default Credentials
+    #[arg(long = "user-google-account")]
+    user_google_account: bool,
+
+    /// Use the Caesim-provided Vision account and get charged against your account credits (coming soon)
+    #[arg(long = "provided-account")]
+    provided_account: bool,
+}
+
+#[derive(Parser, Debug)]
+struct SettingsArgs {
+    #[command(subcommand)]
+    command: SettingsCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum SettingsCommand {
+    /// Configure Google Vision credentials
+    Vision(VisionArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -187,6 +208,18 @@ struct VisionRequest {
     features: Vec<String>,
 }
 
+#[derive(Serialize, Debug)]
+struct CloudVisionImage {
+    path: String,
+    content_base64: String,
+}
+
+#[derive(Serialize, Debug)]
+struct CloudVisionRequest {
+    images: Vec<CloudVisionImage>,
+    features: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct VisionImageResult {
     path: String,
@@ -210,6 +243,14 @@ fn main() -> Result<()> {
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(err) => {
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) {
+                err.print()?;
+                return Ok(());
+            }
+
             if is_missing_cut_rule_value_error(&err.to_string()) {
                 print_available_cut_rules();
                 return Ok(());
@@ -228,6 +269,7 @@ fn main() -> Result<()> {
             }
         }
         Some(Commands::AiAssist) => run_assist(),
+        Some(Commands::Settings(args)) => run_settings(args),
         Some(Commands::Vision(args)) => run_vision(args),
         Some(Commands::Signup(args)) => run_signup(args),
         Some(Commands::Login(args)) => run_login(args),
@@ -235,7 +277,9 @@ fn main() -> Result<()> {
         Some(Commands::ChangePassword(args)) => run_change_password(args),
         Some(Commands::Logout) => run_logout(),
         Some(Commands::Credits(args)) => run_credits(args),
-        None => Err(anyhow!("no command provided; run `caesim --help` to list available commands")),
+        None => Err(anyhow!(
+            "no command provided; run `caesim --help` to list available commands"
+        )),
     }
 }
 
@@ -250,7 +294,13 @@ fn print_available_cut_rules() {
 }
 
 fn available_cut_rules() -> &'static [&'static str] {
-    &["screenshots", "duplicates", "explicit", "landscape", "portrait"]
+    &[
+        "screenshots",
+        "duplicates",
+        "explicit",
+        "landscape",
+        "portrait",
+    ]
 }
 
 fn is_missing_cut_rule_value_error(message: &str) -> bool {
@@ -289,20 +339,32 @@ async fn complete_otp_session(
     })?;
 
     if account_created {
-        eprintln!("Account created and signed in as {} ({})", session.email, session.user_id);
+        eprintln!(
+            "Account created and signed in as {} ({})",
+            session.email, session.user_id
+        );
     } else {
         eprintln!("Signed in as {} ({})", session.email, session.user_id);
     }
     eprintln!("Session saved locally.");
 
     let set_now = prompt_line_allow_empty("Set password now? [Y/n]: ")?;
-    if set_now.trim().is_empty() || matches!(set_now.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+    if set_now.trim().is_empty()
+        || matches!(set_now.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    {
         let new_password = prompt_password("New password: ")?;
         let confirm_password = prompt_password("Confirm password: ")?;
         if new_password != confirm_password {
             return Err(anyhow!("password confirmation does not match"));
         }
-        auth::set_password(supabase_url, supabase_key, &session.user_id, &session.session_token, &new_password).await?;
+        auth::set_password(
+            supabase_url,
+            supabase_key,
+            &session.user_id,
+            &session.session_token,
+            &new_password,
+        )
+        .await?;
         eprintln!("Password set successfully.");
     }
 
@@ -387,11 +449,19 @@ fn run_login(args: LoginArgs) -> Result<()> {
 fn run_whoami() -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
-        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
-        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let mut session = auth::load_session()?
+            .ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let supabase_url =
+            auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
         auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
-        let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await;
+        let me = auth::fetch_me(
+            &supabase_url,
+            &supabase_key,
+            &session.user_id,
+            &session.session_token,
+        )
+        .await;
 
         match me {
             Ok(profile) => {
@@ -404,7 +474,10 @@ fn run_whoami() -> Result<()> {
             }
             Err(err) => {
                 let message = format!("{}", err);
-                if message.contains("401") || message.contains("unauthorized") || message.contains("session expired") {
+                if message.contains("401")
+                    || message.contains("unauthorized")
+                    || message.contains("session expired")
+                {
                     let _ = auth::clear_session();
                 }
                 Err(err)
@@ -436,17 +509,32 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
                 return Err(anyhow!("password confirmation does not match"));
             }
 
-            auth::change_password_with_otp(&supabase_url, &supabase_key, &email, &code, &new_password).await?;
+            auth::change_password_with_otp(
+                &supabase_url,
+                &supabase_key,
+                &email,
+                &code,
+                &new_password,
+            )
+            .await?;
             eprintln!("Password changed successfully via OTP.");
             return Ok(());
         }
 
-        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
-        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let mut session = auth::load_session()?
+            .ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
+        let supabase_url =
+            auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
         auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
 
-        let profile = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
+        let profile = auth::fetch_me(
+            &supabase_url,
+            &supabase_key,
+            &session.user_id,
+            &session.session_token,
+        )
+        .await?;
 
         if !profile.has_password {
             eprintln!("No password is currently set. Setting a new password...");
@@ -455,7 +543,14 @@ fn run_change_password(args: ChangePasswordArgs) -> Result<()> {
             if new_password != confirm_password {
                 return Err(anyhow!("password confirmation does not match"));
             }
-            auth::set_password(&supabase_url, &supabase_key, &session.user_id, &session.session_token, &new_password).await?;
+            auth::set_password(
+                &supabase_url,
+                &supabase_key,
+                &session.user_id,
+                &session.session_token,
+                &new_password,
+            )
+            .await?;
             eprintln!("Password set successfully.");
             return Ok(());
         }
@@ -558,12 +653,18 @@ fn current_unix_ts() -> i64 {
         .as_secs() as i64
 }
 
+fn run_settings(args: SettingsArgs) -> Result<()> {
+    match args.command {
+        SettingsCommand::Vision(args) => run_vision(args),
+    }
+}
+
 fn run_vision(args: VisionArgs) -> Result<()> {
     eprintln!("\n=== Google Cloud Vision Configuration ===\n");
 
     // Check if GOOGLE_APPLICATION_CREDENTIALS is already set
     if let Ok(creds_path) = env::var("GOOGLE_APPLICATION_CREDENTIALS") {
-        eprintln!("✓ GOOGLE_APPLICATION_CREDENTIALS is set to:");
+        eprintln!("OK: GOOGLE_APPLICATION_CREDENTIALS is set to:");
         eprintln!("  {}", creds_path);
         if PathBuf::from(&creds_path).exists() {
             eprintln!("  (file exists)");
@@ -575,40 +676,119 @@ fn run_vision(args: VisionArgs) -> Result<()> {
 
     // Check for default credentials location
     if let Ok(home) = env::var("HOME") {
-        let default_creds = PathBuf::from(home).join(".config/gcloud/application_default_credentials.json");
+        let default_creds =
+            PathBuf::from(home).join(".config/gcloud/application_default_credentials.json");
         if default_creds.exists() {
-            eprintln!("✓ Default Application Credentials found at:");
+            eprintln!("OK: Default Application Credentials found at:");
             eprintln!("  {}", default_creds.display());
             eprintln!();
         }
     }
 
+    if args.user_google_account && args.provided_account {
+        return Err(anyhow!(
+            "choose either --user-google-account or --provided-account, not both"
+        ));
+    }
+
     // If custom path provided, set GOOGLE_APPLICATION_CREDENTIALS to it
     if let Some(custom_json) = args.service_account_json {
         if !custom_json.exists() {
-            return Err(anyhow!("service account JSON does not exist: {}", custom_json.display()));
+            return Err(anyhow!(
+                "service account JSON does not exist: {}",
+                custom_json.display()
+            ));
         }
         eprintln!("To use custom credentials, set the environment variable:");
-        eprintln!("  export GOOGLE_APPLICATION_CREDENTIALS=\"{}\"", custom_json.display());
+        eprintln!(
+            "  export GOOGLE_APPLICATION_CREDENTIALS=\"{}\"",
+            custom_json.display()
+        );
         eprintln!();
         eprintln!("Then run caesim commands with --find flag.");
         return Ok(());
     }
 
-    // Guide through gcloud auth
-    eprintln!("To set up Google Vision credentials, run:");
-    eprintln!("  gcloud auth application-default login");
+    let account_choice = if args.user_google_account {
+        VisionAccountChoice::UserGoogleAccount
+    } else if args.provided_account {
+        VisionAccountChoice::ProvidedAccount
+    } else {
+        prompt_vision_account_choice()?
+    };
+
+    match account_choice {
+        VisionAccountChoice::UserGoogleAccount => setup_user_google_vision_account(),
+        VisionAccountChoice::ProvidedAccount => setup_provided_vision_account(),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum VisionAccountChoice {
+    UserGoogleAccount,
+    ProvidedAccount,
+}
+
+fn prompt_vision_account_choice() -> Result<VisionAccountChoice> {
+    loop {
+        eprintln!("Choose the Google Vision account to use:");
+        eprintln!("  1) Your Google account");
+        eprintln!("  2) Caesim-provided account (coming soon)");
+        let choice = prompt_line("Selection [1/2]: ")?;
+        match choice.trim() {
+            "1" => return Ok(VisionAccountChoice::UserGoogleAccount),
+            "2" => return Ok(VisionAccountChoice::ProvidedAccount),
+            _ => eprintln!("Please enter 1 or 2."),
+        }
+    }
+}
+
+fn setup_user_google_vision_account() -> Result<()> {
+    eprintln!();
+    eprintln!("Setting up Vision with your Google account.");
     eprintln!();
     eprintln!("This will:");
     eprintln!("  1. Open a browser to authenticate with your Google account");
     eprintln!("  2. Save credentials to ~/.config/gcloud/application_default_credentials.json");
     eprintln!("  3. Allow caesim to access Google Cloud Vision API");
     eprintln!();
+
+    let run_now =
+        prompt_line_allow_empty("Run `gcloud auth application-default login` now? [Y/n]: ")?;
+    if is_no_answer(&run_now) {
+        eprintln!("You can finish setup later with:");
+        eprintln!("  gcloud auth application-default login");
+        return Ok(());
+    }
+
+    let status = Command::new("gcloud")
+        .args(["auth", "application-default", "login"])
+        .status()
+        .context("failed to start `gcloud`; install the Google Cloud CLI or choose the provided account when it is available")?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "`gcloud auth application-default login` failed with status {}",
+            status
+        ));
+    }
+
     eprintln!("After setup, you can use caesim with --find flag:");
     eprintln!("  caesim cut <path> --rule duplicates --find cars");
     eprintln!();
 
     Ok(())
+}
+
+fn setup_provided_vision_account() -> Result<()> {
+    eprintln!();
+    eprintln!("The Caesim-provided Vision account is still being built.");
+    eprintln!("For now, select your Google account or pass --service-account-json <path>.");
+    Ok(())
+}
+
+fn is_no_answer(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
 fn run_cut(args: CutArgs) -> Result<()> {
@@ -662,11 +842,23 @@ fn run_cut(args: CutArgs) -> Result<()> {
 
     if vision_enabled && args.charge_vision_credits {
         let runtime = Runtime::new().context("failed to create async runtime for credit checks")?;
-        let mut session = auth::load_session()?.ok_or_else(|| anyhow!("vision mode requires a local session; run `caesim login` first"))?;
-        let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+        let mut session = auth::load_session()?.ok_or_else(|| {
+            anyhow!("vision mode requires a local session; run `caesim login` first")
+        })?;
+        let supabase_url =
+            auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
-        runtime.block_on(auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session))?;
-        let me = runtime.block_on(auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token))?;
+        runtime.block_on(auth::ensure_session_fresh(
+            &supabase_url,
+            &supabase_key,
+            &mut session,
+        ))?;
+        let me = runtime.block_on(auth::fetch_me(
+            &supabase_url,
+            &supabase_key,
+            &session.user_id,
+            &session.session_token,
+        ))?;
         let cost = estimate_vision_credit_cost(images.len());
 
         if me.credit_balance < cost {
@@ -677,7 +869,10 @@ fn run_cut(args: CutArgs) -> Result<()> {
             ));
         }
 
-        eprintln!("Toy credits: vision run will cost {} credit(s); current balance is {}.", cost, me.credit_balance);
+        eprintln!(
+            "Toy credits: vision run will cost {} credit(s); current balance is {}.",
+            cost, me.credit_balance
+        );
         vision_credit_cost = Some(cost);
         credit_balance_before = Some(me.credit_balance);
         vision_credit_runtime = Some(runtime);
@@ -705,12 +900,19 @@ fn run_cut(args: CutArgs) -> Result<()> {
                 .collect(),
             features: vision_features.clone(),
         };
-        Some(call_python_vision(&req)?)
+        Some(call_vision(&req)?)
     } else {
         None
     };
 
-    if let (Some(runtime), Some(supabase_url), Some(supabase_key), Some(user_id), Some(session_token), Some(cost)) = (
+    if let (
+        Some(runtime),
+        Some(supabase_url),
+        Some(supabase_key),
+        Some(user_id),
+        Some(session_token),
+        Some(cost),
+    ) = (
         vision_credit_runtime.as_ref(),
         vision_credit_supabase_url.as_ref(),
         vision_credit_supabase_key.as_ref(),
@@ -726,7 +928,10 @@ fn run_cut(args: CutArgs) -> Result<()> {
             cost,
         ))?;
         credit_balance_after = Some(new_balance);
-        eprintln!("Toy credits: charged {} credit(s); new balance is {}.", cost, new_balance);
+        eprintln!(
+            "Toy credits: charged {} credit(s); new balance is {}.",
+            cost, new_balance
+        );
     }
 
     let vision_duplicate_sources = vision_map
@@ -739,9 +944,9 @@ fn run_cut(args: CutArgs) -> Result<()> {
 
     let report_path = args.report.clone().unwrap_or_else(|| {
         // Default to XDG cache dir if available, otherwise $HOME/.cache, then ./
-        let cache_base = std::env::var("XDG_CACHE_HOME").map(PathBuf::from).or_else(|_| {
-            std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache"))
-        });
+        let cache_base = std::env::var("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache")));
 
         let cache_dir = cache_base.unwrap_or_else(|_| PathBuf::from("."));
         let caesim_cache = cache_dir.join("caesim");
@@ -918,18 +1123,21 @@ fn run_cut_undo(report_path: Option<PathBuf>) -> Result<()> {
     let report_path = match report_path {
         Some(p) => p,
         None => {
-            let cache_base = std::env::var("XDG_CACHE_HOME").map(PathBuf::from).or_else(|_| {
-                std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache"))
-            });
+            let cache_base = std::env::var("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache")));
 
             let cache_dir = cache_base.unwrap_or_else(|_| PathBuf::from("."));
             let caesim_cache = cache_dir.join("caesim");
             if caesim_cache.exists() && caesim_cache.is_dir() {
                 let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
-                for entry in fs::read_dir(&caesim_cache).unwrap_or_else(|_| fs::read_dir(".").unwrap()) {
+                for entry in
+                    fs::read_dir(&caesim_cache).unwrap_or_else(|_| fs::read_dir(".").unwrap())
+                {
                     if let Ok(entry) = entry {
                         let path = entry.path();
-                        if path.is_file() && path.to_string_lossy().ends_with(".caesim-report.json") {
+                        if path.is_file() && path.to_string_lossy().ends_with(".caesim-report.json")
+                        {
                             if let Ok(meta) = entry.metadata() {
                                 if let Ok(mtime) = meta.modified() {
                                     match &latest {
@@ -1009,7 +1217,10 @@ fn run_cut_undo(report_path: Option<PathBuf>) -> Result<()> {
         let cut_dir_path = PathBuf::from(&report.cut_dir);
         if cut_dir_path.is_dir() && is_dir_empty(&cut_dir_path)? {
             fs::remove_dir(&cut_dir_path).with_context(|| {
-                format!("failed to remove empty cut directory {}", cut_dir_path.display())
+                format!(
+                    "failed to remove empty cut directory {}",
+                    cut_dir_path.display()
+                )
             })?;
             eprintln!("Removed empty cut directory {}.", cut_dir_path.display());
         }
@@ -1170,7 +1381,10 @@ fn discover_images(root: &Path, skip_dirs: &[PathBuf]) -> Result<Vec<PathBuf>> {
     for entry in WalkDir::new(root).follow_links(false) {
         let entry = entry?;
         let path = entry.path();
-        if skip_dirs.iter().any(|skip| path == skip || path.starts_with(skip)) {
+        if skip_dirs
+            .iter()
+            .any(|skip| path == skip || path.starts_with(skip))
+        {
             continue;
         }
         if entry.file_type().is_file() {
@@ -1400,7 +1614,10 @@ fn unique_restore_destination(source: &Path) -> Result<PathBuf> {
         return Ok(dest);
     }
 
-    let stem = source.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
+    let stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("file");
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("");
     for i in 1..10_000u32 {
         let candidate = if ext.is_empty() {
@@ -1520,7 +1737,8 @@ with Image.open(path) as img:
         ));
     }
 
-    let stdout = String::from_utf8(output.stdout).context("python3 fallback returned invalid utf-8")?;
+    let stdout =
+        String::from_utf8(output.stdout).context("python3 fallback returned invalid utf-8")?;
     let mut parts = stdout.split_whitespace();
     let width: u32 = parts
         .next()
@@ -1578,6 +1796,64 @@ fn normalized_words(value: &str) -> Vec<String> {
         .split_whitespace()
         .map(str::to_string)
         .collect()
+}
+
+fn call_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
+    if let Ok(url) = std::env::var("CAESIM_VISION_URL") {
+        if !url.trim().is_empty() {
+            return call_cloud_vision(url.trim(), req);
+        }
+    }
+
+    call_python_vision(req)
+}
+
+fn call_cloud_vision(url: &str, req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
+    let images = req
+        .images
+        .iter()
+        .map(|path| {
+            let bytes = fs::read(path)
+                .with_context(|| format!("failed to read image for cloud vision: {path}"))?;
+            Ok(CloudVisionImage {
+                path: path.clone(),
+                content_base64: BASE64_STANDARD.encode(bytes),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let payload = CloudVisionRequest {
+        images,
+        features: req.features.clone(),
+    };
+
+    let runtime = Runtime::new().context("failed to create async runtime for cloud vision")?;
+    let resp = runtime.block_on(async {
+        let client = reqwest::Client::new();
+        let mut request = client.post(url).json(&payload);
+        if let Ok(token) = std::env::var("CAESIM_VISION_BEARER_TOKEN") {
+            if !token.trim().is_empty() {
+                request = request.header("Authorization", format!("Bearer {}", token.trim()));
+            }
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("failed to send cloud vision request to {url}"))?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(anyhow!("cloud vision request failed with {status}: {body}"));
+        }
+        serde_json::from_str::<VisionResponse>(&body)
+            .context("failed to parse cloud vision response")
+    })?;
+
+    Ok(resp
+        .results
+        .into_iter()
+        .map(|r| (r.path.clone(), r))
+        .collect())
 }
 
 fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
@@ -1741,15 +2017,30 @@ mod tests {
 
     #[test]
     fn rule_features_cover_only_special_cases() {
-        assert_eq!(available_cut_rules(), &["screenshots", "duplicates", "explicit", "landscape", "portrait"]);
+        assert_eq!(
+            available_cut_rules(),
+            &[
+                "screenshots",
+                "duplicates",
+                "explicit",
+                "landscape",
+                "portrait"
+            ]
+        );
         assert_eq!(vision_features_for_rule("food"), Vec::<String>::new());
-        assert_eq!(vision_features_for_rule("screenshots"), Vec::<String>::new());
-        assert_eq!(vision_features_for_rule("duplicates"), vec![
-            "LABEL_DETECTION".to_string(),
-            "TEXT_DETECTION".to_string(),
-            "WEB_DETECTION".to_string(),
-            "IMAGE_PROPERTIES".to_string(),
-        ]);
+        assert_eq!(
+            vision_features_for_rule("screenshots"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            vision_features_for_rule("duplicates"),
+            vec![
+                "LABEL_DETECTION".to_string(),
+                "TEXT_DETECTION".to_string(),
+                "WEB_DETECTION".to_string(),
+                "IMAGE_PROPERTIES".to_string(),
+            ]
+        );
         assert_eq!(
             vision_features_for_rule("explicit"),
             vec!["SAFE_SEARCH_DETECTION"]
