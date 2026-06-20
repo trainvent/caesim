@@ -144,7 +144,7 @@ pub async fn start_login(base_url: &str, anon_key: &str, email: &str) -> Result<
 
     let email = email.trim().to_string();
     Ok(LoginResponse {
-        message: format!("Check the email inbox for {email}. Paste the 6-digit OTP code back into caesim."),
+        message: format!("Check the email inbox for {email}. Paste the 8-digit OTP code back into caesim."),
     })
 }
 

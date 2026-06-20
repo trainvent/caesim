@@ -281,15 +281,37 @@ The same Python backend exposes an HTTP function entry point named
 `vision_http`. Deploy it as a Gen 2 function backed by Cloud Run:
 
 ```bash
-gcloud functions deploy caesim-vision \
-  --gen2 \
-  --runtime=python312 \
-  --region=us-central1 \
-  --source=python \
-  --entry-point=vision_http \
-  --trigger-http \
-  --set-env-vars=INPUT_BUCKET_NAME=<processing-bucket>,OUTPUT_BUCKET_NAME=<results-bucket>
+./scripts/deploy-vision-backend.sh \
+  --project caesim-prod \
+  --region europe-west1 \
+  --bucket-location EU \
+  --processing-bucket caesim-vision-processing \
+  --results-bucket caesim-vision-results \
+  --service-account vision-app-sa@caesim-prod.iam.gserviceaccount.com \
+  --test-invoker you@example.com
 ```
+
+The deploy helper:
+
+1. Enables `vision.googleapis.com`, `run.googleapis.com`,
+   `cloudfunctions.googleapis.com`, `cloudbuild.googleapis.com`, and
+   `artifactregistry.googleapis.com`.
+2. Creates the processing and results buckets if they do not exist.
+3. Applies a lifecycle rule that deletes objects older than 2 days.
+4. Grants the runtime service account `roles/storage.objectAdmin` on both
+   buckets.
+5. Deploys `caesim-vision` with
+   `INPUT_BUCKET_NAME` and `OUTPUT_BUCKET_NAME` set.
+6. Optionally grants your test user `roles/run.invoker` on the Cloud Run
+   service.
+
+If customer uploads live in a separate GCS bucket, add
+`--source-bucket <customer-upload-bucket>` so the function service account can
+read those objects with `roles/storage.objectViewer`.
+
+Use a different region, such as `us-central1`, if the rest of the project is
+already there. Keep the function region and bucket location aligned where
+practical.
 
 The root endpoint supports synchronous CLI requests. Point the CLI at the deployed endpoint:
 
@@ -309,11 +331,11 @@ sync endpoint:
 ```bash
 curl -X POST "$CAESIM_VISION_URL/v1/analyze-batch" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $CAESIM_VISION_PROXY_TOKEN" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
   -d '{
-    "customer_id": "customer_123",
+    "customer_id": "test_customer",
     "features": ["LABEL_DETECTION", "TEXT_DETECTION"],
-    "gcs_input_uri": "gs://customer-upload-bucket/customer_123/incoming/"
+    "gcs_input_uri": "gs://customer-upload-bucket/test_customer/incoming/"
   }'
 ```
 
@@ -326,13 +348,32 @@ The service copies supported GCS images into
 Check status with:
 
 ```bash
-curl "$CAESIM_VISION_URL/v1/status/<batch_id>?customer_id=customer_123" \
-  -H "Authorization: Bearer $CAESIM_VISION_PROXY_TOKEN"
+curl "$CAESIM_VISION_URL/v1/status/<batch_id>?customer_id=test_customer" \
+  -H "Authorization: Bearer $(gcloud auth print-identity-token)"
 ```
 
-Set `CAESIM_VISION_PROXY_TOKEN` on the function if this endpoint is exposed
-publicly. Configure lifecycle rules on the processing and results buckets to
-delete raw images and JSON outputs after 24-48 hours.
+With `--no-allow-unauthenticated`, Cloud Run IAM enforces access before the
+function receives a request. If you later expose the endpoint publicly, set
+`CAESIM_VISION_PROXY_TOKEN` on the function and send that bearer token from the
+trusted caller until the endpoint uses first-class app auth.
+
+Immediate smoke-test target:
+
+1. `cargo run -- cut ./photos --find receipt --dry-run` returns either Vision
+   output or real Vision analysis errors, not an auth or timeout failure.
+2. `POST /v1/analyze-batch` returns a `batch_id`.
+3. `GET /v1/status/<batch_id>?customer_id=test_customer` moves from `running`
+   to `complete` and returns result JSON URIs in the results bucket.
+
+Production hardening before launch:
+
+1. Replace proxy token and request JSON trust with real app auth.
+2. Derive `customer_id` from the authenticated user/session.
+3. Store batch state in Supabase instead of inferring it only from GCS output.
+4. Add a completion worker through Eventarc when result JSON lands in GCS.
+5. Parse Vision result JSON into Caesim's normalized `VisionImageResult` shape.
+6. Add per-customer quota/rate limits.
+7. Add cost gates before launching async jobs.
 
 By default, Vision runs do not consume account credits. To enable credit charging for a run, pass:
 
