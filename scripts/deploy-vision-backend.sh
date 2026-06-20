@@ -18,6 +18,8 @@ SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-vision-app-sa@caesim-prod.iam.gserviceaccoun
 TEST_INVOKER="${TEST_INVOKER:-}"
 SOURCE_BUCKET="${SOURCE_BUCKET:-}"
 LIFECYCLE_AGE_DAYS="${LIFECYCLE_AGE_DAYS:-2}"
+SUPABASE_URL="${SUPABASE_URL:-${PROJECT_URL:-}}"
+SERVICE_ROLE_SECRET="${SERVICE_ROLE_SECRET:-}"
 ALLOW_UNAUTHENTICATED=0
 
 usage() {
@@ -35,10 +37,13 @@ Options:
   --source-bucket <name>      Optional customer upload bucket to grant objectViewer
   --test-invoker <email>      Optional user email to grant roles/run.invoker
   --lifecycle-age-days <n>    Delete bucket objects older than n days (default: 2)
+  --supabase-url <url>        Supabase project URL used to verify Caesim sessions
+  --service-role-secret <id>  Secret Manager secret for SERVICE_ROLE_KEY
   --allow-unauthenticated     Deploy HTTP endpoint without IAM auth
   -h, --help                  Show this help
 
 Environment variables with matching uppercase names can also be used.
+For app-session Vision auth, set SUPABASE_URL and SERVICE_ROLE_SECRET.
 EOF
 }
 
@@ -54,6 +59,8 @@ while [[ $# -gt 0 ]]; do
     --source-bucket) SOURCE_BUCKET="$2"; shift 2 ;;
     --test-invoker) TEST_INVOKER="$2"; shift 2 ;;
     --lifecycle-age-days) LIFECYCLE_AGE_DAYS="$2"; shift 2 ;;
+    --supabase-url) SUPABASE_URL="$2"; shift 2 ;;
+    --service-role-secret) SERVICE_ROLE_SECRET="$2"; shift 2 ;;
     --allow-unauthenticated) ALLOW_UNAUTHENTICATED=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1"; usage; exit 1 ;;
@@ -91,6 +98,18 @@ bind_bucket_role() {
     --quiet
 }
 
+bind_secret_role() {
+  local secret="$1"
+  local member="$2"
+  local role="$3"
+  echo "Granting ${role} on secret ${secret} to ${member}..."
+  gcloud secrets add-iam-policy-binding "$secret" \
+    --project "$PROJECT_ID" \
+    --member "$member" \
+    --role "$role" \
+    --quiet
+}
+
 require_command gcloud
 
 LIFECYCLE_FILE="$(mktemp)"
@@ -120,6 +139,7 @@ gcloud services enable \
   cloudfunctions.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
   --project "$PROJECT_ID"
 
 ensure_bucket "$PROCESSING_BUCKET"
@@ -145,6 +165,22 @@ if [[ "$ALLOW_UNAUTHENTICATED" -eq 1 ]]; then
   AUTH_FLAG="--allow-unauthenticated"
 fi
 
+ENV_VARS="INPUT_BUCKET_NAME=${PROCESSING_BUCKET},OUTPUT_BUCKET_NAME=${RESULTS_BUCKET}"
+if [[ -n "$SUPABASE_URL" ]]; then
+  ENV_VARS="${ENV_VARS},SUPABASE_URL=${SUPABASE_URL}"
+fi
+
+SECRET_ARGS=()
+if [[ -n "$SERVICE_ROLE_SECRET" ]]; then
+  bind_secret_role "$SERVICE_ROLE_SECRET" "$RUNTIME_MEMBER" "roles/secretmanager.secretAccessor"
+  SECRET_ARGS+=(--set-secrets="SERVICE_ROLE_KEY=${SERVICE_ROLE_SECRET}:latest")
+fi
+
+if [[ "$ALLOW_UNAUTHENTICATED" -eq 0 && -n "$SERVICE_ROLE_SECRET" ]]; then
+  echo "Note: Caesim session verification happens inside the function, but Cloud Run IAM will still reject non-Google bearer tokens."
+  echo "      Use --allow-unauthenticated for the Caesim-session endpoint, or keep IAM auth for gcloud identity-token smoke tests."
+fi
+
 echo "Deploying ${FUNCTION_NAME}..."
 gcloud functions deploy "$FUNCTION_NAME" \
   --project "$PROJECT_ID" \
@@ -155,7 +191,8 @@ gcloud functions deploy "$FUNCTION_NAME" \
   --entry-point=vision_http \
   --trigger-http \
   --service-account="$SERVICE_ACCOUNT" \
-  --set-env-vars="INPUT_BUCKET_NAME=${PROCESSING_BUCKET},OUTPUT_BUCKET_NAME=${RESULTS_BUCKET}" \
+  --set-env-vars="$ENV_VARS" \
+  "${SECRET_ARGS[@]}" \
   "$AUTH_FLAG"
 
 if [[ -n "$TEST_INVOKER" ]]; then
@@ -164,6 +201,16 @@ if [[ -n "$TEST_INVOKER" ]]; then
     --project "$PROJECT_ID" \
     --region="$REGION" \
     --member="user:${TEST_INVOKER}" \
+    --role="roles/run.invoker" \
+    --quiet
+fi
+
+if [[ "$ALLOW_UNAUTHENTICATED" -eq 1 ]]; then
+  echo "Granting Cloud Run invoker to allUsers so the function can verify Caesim sessions internally..."
+  gcloud run services add-iam-policy-binding "$FUNCTION_NAME" \
+    --project "$PROJECT_ID" \
+    --region="$REGION" \
+    --member="allUsers" \
     --role="roles/run.invoker" \
     --quiet
 fi
@@ -178,4 +225,8 @@ echo
 echo "Deployment complete."
 echo "Set this for CLI sync smoke tests:"
 echo "  export CAESIM_VISION_URL=\"${FUNCTION_URL}\""
-echo "  export CAESIM_VISION_BEARER_TOKEN=\"\$(gcloud auth print-identity-token)\""
+if [[ "$ALLOW_UNAUTHENTICATED" -eq 1 && -n "$SERVICE_ROLE_SECRET" ]]; then
+  echo "Then run caesim after logging in; the CLI will send the Caesim session token automatically."
+else
+  echo "  export CAESIM_VISION_BEARER_TOKEN=\"\$(gcloud auth print-identity-token)\""
+fi

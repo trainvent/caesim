@@ -288,6 +288,9 @@ The same Python backend exposes an HTTP function entry point named
   --processing-bucket caesim-vision-processing \
   --results-bucket caesim-vision-results \
   --service-account vision-app-sa@caesim-prod.iam.gserviceaccount.com \
+  --supabase-url https://<project-ref>.supabase.co \
+  --service-role-secret <gcloud-secret-name-containing-service-role-key> \
+  --allow-unauthenticated \
   --test-invoker you@example.com
 ```
 
@@ -313,13 +316,20 @@ Use a different region, such as `us-central1`, if the rest of the project is
 already there. Keep the function region and bucket location aligned where
 practical.
 
-The root endpoint supports synchronous CLI requests. Point the CLI at the deployed endpoint:
+The root endpoint supports synchronous CLI requests. Point the CLI at the
+deployed endpoint and sign in with Caesim; the CLI sends the local Supabase
+session token to the function:
 
 ```bash
 export CAESIM_VISION_URL="https://<function-url>"
+caesim login
 ```
 
-If the endpoint requires authentication, provide a bearer token too:
+For the Caesim-session flow, deploy with `--allow-unauthenticated` and let the
+function verify the Supabase JWT internally using its `SERVICE_ROLE_KEY` secret.
+If Cloud Run IAM remains enabled, it will reject the Supabase bearer token before
+the function receives the request. For IAM-only smoke tests, override the bearer
+token with a Google identity token:
 
 ```bash
 export CAESIM_VISION_BEARER_TOKEN="$(gcloud auth print-identity-token)"
@@ -331,9 +341,8 @@ sync endpoint:
 ```bash
 curl -X POST "$CAESIM_VISION_URL/v1/analyze-batch" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
   -d '{
-    "customer_id": "test_customer",
     "features": ["LABEL_DETECTION", "TEXT_DETECTION"],
     "gcs_input_uri": "gs://customer-upload-bucket/test_customer/incoming/"
   }'
@@ -348,14 +357,13 @@ The service copies supported GCS images into
 Check status with:
 
 ```bash
-curl "$CAESIM_VISION_URL/v1/status/<batch_id>?customer_id=test_customer" \
-  -H "Authorization: Bearer $(gcloud auth print-identity-token)"
+curl "$CAESIM_VISION_URL/v1/status/<batch_id>" \
+  -H "Authorization: Bearer $SESSION_TOKEN"
 ```
 
-With `--no-allow-unauthenticated`, Cloud Run IAM enforces access before the
-function receives a request. If you later expose the endpoint publicly, set
-`CAESIM_VISION_PROXY_TOKEN` on the function and send that bearer token from the
-trusted caller until the endpoint uses first-class app auth.
+`CAESIM_VISION_PROXY_TOKEN` is still supported as a trusted-caller bypass, but
+the normal app path should use a Caesim/Supabase session token. Authenticated
+batch requests derive `customer_id` from the verified Supabase user id.
 
 Immediate smoke-test target:
 

@@ -65,9 +65,13 @@ struct CutArgs {
     #[arg(long = "find", value_name = "LABEL")]
     find: Option<String>,
 
-    /// Charge account credits for a Vision run (disabled by default)
-    #[arg(long = "charge-vision-credits", default_value_t = false)]
+    /// Charge account credits for a Vision run (enabled by default)
+    #[arg(long = "charge-vision-credits", default_value_t = true)]
     charge_vision_credits: bool,
+
+    /// Skip account credit charging for a Vision run
+    #[arg(long = "no-charge-vision-credits", default_value_t = false)]
+    no_charge_vision_credits: bool,
 
     /// Folder to move matched files into (defaults to <path>/cut)
     #[arg(long = "destination")]
@@ -200,6 +204,14 @@ struct ComplexityEstimate {
     notes: Vec<String>,
 }
 
+#[derive(Debug)]
+struct VisionCreditEstimate {
+    credits: i64,
+    upload_bytes: u64,
+    image_feature_ops: u64,
+    request_count: u64,
+}
+
 // Backboard request/response types moved to `src/ai_assist` module.
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -236,6 +248,11 @@ struct VisionImageResult {
 #[derive(Serialize, Deserialize, Debug)]
 struct VisionResponse {
     results: Vec<VisionImageResult>,
+}
+
+enum CloudVisionAuth {
+    GoogleBearer(String),
+    CaesimSession(String),
 }
 
 fn main() -> Result<()> {
@@ -840,7 +857,10 @@ fn run_cut(args: CutArgs) -> Result<()> {
     let mut vision_credit_user_id = None;
     let mut vision_credit_session_token = None;
 
-    if vision_enabled && args.charge_vision_credits {
+    let charge_vision_credits =
+        vision_enabled && args.charge_vision_credits && !args.no_charge_vision_credits;
+
+    if charge_vision_credits {
         let runtime = Runtime::new().context("failed to create async runtime for credit checks")?;
         let mut session = auth::load_session()?.ok_or_else(|| {
             anyhow!("vision mode requires a local session; run `caesim login` first")
@@ -859,7 +879,9 @@ fn run_cut(args: CutArgs) -> Result<()> {
             &session.user_id,
             &session.session_token,
         ))?;
-        let cost = estimate_vision_credit_cost(images.len());
+        let credit_estimate =
+            estimate_vision_credit_cost(&images, vision_features.len(), cloud_vision_chunk_size())?;
+        let cost = credit_estimate.credits;
 
         if me.credit_balance < cost {
             return Err(anyhow!(
@@ -870,8 +892,12 @@ fn run_cut(args: CutArgs) -> Result<()> {
         }
 
         eprintln!(
-            "Toy credits: vision run will cost {} credit(s); current balance is {}.",
-            cost, me.credit_balance
+            "Toy credits: vision run will cost {} credit(s) for {:.2} MiB upload, {} image-feature op(s), {} request(s); current balance is {}.",
+            cost,
+            credit_estimate.upload_mebibytes(),
+            credit_estimate.image_feature_ops,
+            credit_estimate.request_count,
+            me.credit_balance
         );
         vision_credit_cost = Some(cost);
         credit_balance_before = Some(me.credit_balance);
@@ -881,9 +907,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
         vision_credit_user_id = Some(session.user_id);
         vision_credit_session_token = Some(session.session_token);
     } else if vision_enabled {
-        eprintln!(
-            "Vision run credit charging is disabled (default). Use --charge-vision-credits to consume account credits."
-        );
+        eprintln!("Vision run credit charging is disabled for this run.");
     }
 
     // Optional: call python vision backend to get labels/safesearch/text/web/image properties.
@@ -1680,12 +1704,54 @@ fn estimate_complexity(image_count: usize, vision_enabled: bool) -> ComplexityEs
     ComplexityEstimate { score, tier, notes }
 }
 
-fn estimate_vision_credit_cost(image_count: usize) -> i64 {
-    if image_count == 0 {
-        0
-    } else {
-        image_count as i64
+impl VisionCreditEstimate {
+    fn upload_mebibytes(&self) -> f64 {
+        self.upload_bytes as f64 / 1_048_576.0
     }
+}
+
+fn estimate_vision_credit_cost(
+    images: &[PathBuf],
+    feature_count: usize,
+    chunk_size: usize,
+) -> Result<VisionCreditEstimate> {
+    if images.is_empty() || feature_count == 0 {
+        return Ok(VisionCreditEstimate {
+            credits: 0,
+            upload_bytes: 0,
+            image_feature_ops: 0,
+            request_count: 0,
+        });
+    }
+
+    let mut upload_bytes = 0_u64;
+    for path in images {
+        let metadata = fs::metadata(path).with_context(|| {
+            format!(
+                "failed to stat image for vision credit estimate: {}",
+                path.display()
+            )
+        })?;
+        upload_bytes = upload_bytes.saturating_add(metadata.len());
+    }
+
+    let image_feature_ops = images.len() as u64 * feature_count as u64;
+    let request_count = images.len().div_ceil(chunk_size.max(1)) as u64;
+
+    let upload_credits = upload_bytes.div_ceil(1_048_576);
+    let operation_credits = image_feature_ops.div_ceil(25);
+    let request_credits = request_count.div_ceil(10);
+    let credits = upload_credits
+        .saturating_add(operation_credits)
+        .saturating_add(request_credits)
+        .max(1) as i64;
+
+    Ok(VisionCreditEstimate {
+        credits,
+        upload_bytes,
+        image_feature_ops,
+        request_count,
+    })
 }
 
 fn vision_features_for_rule(rule: &str) -> Vec<String> {
@@ -1801,59 +1867,118 @@ fn normalized_words(value: &str) -> Vec<String> {
 fn call_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
     if let Ok(url) = std::env::var("CAESIM_VISION_URL") {
         if !url.trim().is_empty() {
+            eprintln!("Vision backend: cloud function ({})", url.trim());
             return call_cloud_vision(url.trim(), req);
         }
     }
 
+    eprintln!(
+        "Vision backend: local Python fallback (CAESIM_VISION_URL is not set; this uses local Google ADC)."
+    );
     call_python_vision(req)
 }
 
 fn call_cloud_vision(url: &str, req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {
-    let images = req
-        .images
-        .iter()
-        .map(|path| {
-            let bytes = fs::read(path)
-                .with_context(|| format!("failed to read image for cloud vision: {path}"))?;
-            Ok(CloudVisionImage {
-                path: path.clone(),
-                content_base64: BASE64_STANDARD.encode(bytes),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let payload = CloudVisionRequest {
-        images,
-        features: req.features.clone(),
-    };
-
     let runtime = Runtime::new().context("failed to create async runtime for cloud vision")?;
-    let resp = runtime.block_on(async {
-        let client = reqwest::Client::new();
-        let mut request = client.post(url).json(&payload);
-        if let Ok(token) = std::env::var("CAESIM_VISION_BEARER_TOKEN") {
-            if !token.trim().is_empty() {
-                request = request.header("Authorization", format!("Bearer {}", token.trim()));
-            }
-        }
-        let response = request
-            .send()
-            .await
-            .with_context(|| format!("failed to send cloud vision request to {url}"))?;
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow!("cloud vision request failed with {status}: {body}"));
-        }
-        serde_json::from_str::<VisionResponse>(&body)
-            .context("failed to parse cloud vision response")
-    })?;
+    let auth = cloud_vision_auth(&runtime)?;
+    let chunk_size = cloud_vision_chunk_size();
+    let client = reqwest::Client::new();
+    let mut results = HashMap::new();
 
-    Ok(resp
-        .results
-        .into_iter()
-        .map(|r| (r.path.clone(), r))
-        .collect())
+    for (chunk_index, paths) in req.images.chunks(chunk_size).enumerate() {
+        let start = chunk_index * chunk_size + 1;
+        let end = start + paths.len() - 1;
+        eprintln!(
+            "Cloud Vision uploading images {}-{}/{} ({} image(s))",
+            start,
+            end,
+            req.images.len(),
+            paths.len()
+        );
+
+        let images = paths
+            .iter()
+            .map(|path| {
+                let bytes = fs::read(path)
+                    .with_context(|| format!("failed to read image for cloud vision: {path}"))?;
+                Ok(CloudVisionImage {
+                    path: path.clone(),
+                    content_base64: BASE64_STANDARD.encode(bytes),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let payload = CloudVisionRequest {
+            images,
+            features: req.features.clone(),
+        };
+
+        let resp = runtime.block_on(send_cloud_vision_chunk(&client, url, &auth, &payload))?;
+
+        for result in resp.results {
+            results.insert(result.path.clone(), result);
+        }
+    }
+
+    Ok(results)
+}
+
+async fn send_cloud_vision_chunk(
+    client: &reqwest::Client,
+    url: &str,
+    auth: &CloudVisionAuth,
+    payload: &CloudVisionRequest,
+) -> Result<VisionResponse> {
+    let mut request = client.post(url).json(payload);
+    request = match auth {
+        CloudVisionAuth::GoogleBearer(token) => {
+            request.header("Authorization", format!("Bearer {}", token))
+        }
+        CloudVisionAuth::CaesimSession(token) => request.header("X-Caesim-Session", token),
+    };
+    let response = request
+        .send()
+        .await
+        .with_context(|| format!("failed to send cloud vision request to {url}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(anyhow!("cloud vision request failed with {status}: {body}"));
+    }
+    serde_json::from_str::<VisionResponse>(&body).context("failed to parse cloud vision response")
+}
+
+fn cloud_vision_chunk_size() -> usize {
+    std::env::var("CAESIM_VISION_CLOUD_CHUNK_SIZE")
+        .or_else(|_| std::env::var("CAESIM_VISION_CHUNK_SIZE"))
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(3)
+}
+
+fn cloud_vision_auth(runtime: &Runtime) -> Result<CloudVisionAuth> {
+    if let Ok(token) = std::env::var("CAESIM_VISION_BEARER_TOKEN") {
+        let token = token.trim().to_string();
+        if !token.is_empty() {
+            eprintln!("Vision auth: using CAESIM_VISION_BEARER_TOKEN.");
+            return Ok(CloudVisionAuth::GoogleBearer(token));
+        }
+    }
+
+    let mut session = auth::load_session()?.ok_or_else(|| {
+        anyhow!("cloud vision requires a local session; run `caesim login` first")
+    })?;
+    let supabase_url =
+        auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
+    let supabase_key = auth::default_supabase_anon_key()?;
+    runtime.block_on(auth::ensure_session_fresh(
+        &supabase_url,
+        &supabase_key,
+        &mut session,
+    ))?;
+    eprintln!("Vision auth: using Caesim session for {}.", session.email);
+    Ok(CloudVisionAuth::CaesimSession(session.session_token))
 }
 
 fn call_python_vision(req: &VisionRequest) -> Result<HashMap<String, VisionImageResult>> {

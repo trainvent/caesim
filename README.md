@@ -81,8 +81,9 @@ pip install -r requirements.txt
 
 You can point Caesim at a custom local backend with `CAESIM_VISION_BACKEND`.
 To use the Cloud Run Vision function instead, set `CAESIM_VISION_URL` to the
-function URL. If the function requires authentication, also set
-`CAESIM_VISION_BEARER_TOKEN`.
+function URL and sign in with `caesim login`; the CLI sends your Caesim session
+token to the function. `CAESIM_VISION_BEARER_TOKEN` is only needed for legacy
+Cloud Run IAM/proxy-token smoke tests.
 
 The Cloud Run backend also includes an async GCS batch API for larger hosted
 runs. See [DEVELOPER.md](DEVELOPER.md) for the bucket env vars and status

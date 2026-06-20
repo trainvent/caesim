@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import uuid
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -226,6 +228,10 @@ def vision_http(request: Any) -> Tuple[str, int, Dict[str, str]]:
             return batch_status(request, path.rsplit("/", 1)[-1])
 
         req = request.get_json(silent=True) or {}
+        try:
+            authenticate_request(request)
+        except AuthError as e:
+            return json_response({"error": str(e)}, 401)
         image_inputs = request_image_inputs(req)
         features: List[str] = req.get("features", [])
 
@@ -255,11 +261,13 @@ def vision_http(request: Any) -> Tuple[str, int, Dict[str, str]]:
 
 
 def start_async_batch(request: Any) -> Tuple[str, int, Dict[str, str]]:
-    if not proxy_auth_ok(request):
-        return json_response({"error": "unauthorized"}, 401)
+    try:
+        user = authenticate_request(request)
+    except AuthError as e:
+        return json_response({"error": str(e)}, 401)
 
     req = request.get_json(silent=True) or {}
-    customer_id = request_customer_id(request, req)
+    customer_id = user.get("id") or request_customer_id(request, req)
     if not customer_id:
         return json_response({"error": "customer_id is required"}, 400)
 
@@ -332,10 +340,14 @@ def start_async_batch(request: Any) -> Tuple[str, int, Dict[str, str]]:
 
 
 def batch_status(request: Any, batch_id: str) -> Tuple[str, int, Dict[str, str]]:
-    if not proxy_auth_ok(request):
-        return json_response({"error": "unauthorized"}, 401)
+    try:
+        user = authenticate_request(request)
+    except AuthError as e:
+        return json_response({"error": str(e)}, 401)
 
-    customer_id = request.args.get("customer_id") if hasattr(request, "args") else None
+    customer_id = user.get("id")
+    if not customer_id:
+        customer_id = request.args.get("customer_id") if hasattr(request, "args") else None
     if not customer_id:
         return json_response({"error": "customer_id query parameter is required"}, 400)
 
@@ -377,9 +389,59 @@ def batch_status(request: Any, batch_id: str) -> Tuple[str, int, Dict[str, str]]
 def proxy_auth_ok(request: Any) -> bool:
     expected = os.environ.get("CAESIM_VISION_PROXY_TOKEN")
     if not expected:
-        return True
+        return False
     auth_header = request.headers.get("Authorization", "")
     return auth_header == f"Bearer {expected}"
+
+
+class AuthError(Exception):
+    pass
+
+
+def authenticate_request(request: Any) -> Dict[str, Any]:
+    if proxy_auth_ok(request):
+        return {}
+
+    token = bearer_token(request)
+    project_url = supabase_project_url()
+    service_key = required_env("SERVICE_ROLE_KEY")
+    url = f"{project_url}/auth/v1/user"
+    auth_request = urllib.request.Request(
+        url,
+        headers={
+            "apikey": service_key,
+            "Authorization": f"Bearer {token}",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(auth_request, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+            return json.loads(raw)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")
+        raise AuthError(f"auth lookup failed: {e.code} {detail}") from e
+    except Exception as e:
+        raise AuthError(f"auth lookup failed: {e}") from e
+
+
+def bearer_token(request: Any) -> str:
+    session_header = request.headers.get("X-Caesim-Session", "")
+    if session_header.strip():
+        return session_header.strip()
+
+    auth_header = request.headers.get("Authorization", "")
+    parts = auth_header.split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer" or not parts[1].strip():
+        raise AuthError("missing bearer token")
+    return parts[1].strip()
+
+
+def supabase_project_url() -> str:
+    value = os.environ.get("SUPABASE_URL") or os.environ.get("PROJECT_URL")
+    if not value:
+        raise AuthError("missing SUPABASE_URL or PROJECT_URL")
+    return value.rstrip("/")
 
 
 def request_customer_id(request: Any, req: Dict[str, Any]) -> str:
