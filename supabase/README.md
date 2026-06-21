@@ -11,6 +11,8 @@ Use psql or the Supabase SQL editor to run the migration:
 psql "$(supabase db connection-string)" -f supabase/migrations/001_credit_tables.sql
 psql "$(supabase db connection-string)" -f supabase/migrations/002_payments.sql
 psql "$(supabase db connection-string)" -f supabase/migrations/003_auth_user_row_trigger.sql
+psql "$(supabase db connection-string)" -f supabase/migrations/004_fix_apply_credit_change_id_compare.sql
+psql "$(supabase db connection-string)" -f supabase/migrations/005_refunds.sql
 # or paste the SQL into the Supabase SQL editor
 ```
 
@@ -46,6 +48,7 @@ The payment foundation is also prepared here:
 - `public.users` stores `stripe_customer_id`, billing status, and balance metadata.
 - `public.credit_ledger` keeps an append-only audit trail for every credit delta.
 - `public.payment_events` records Stripe-ready payment events so a webhook can replay safely later.
+- `public.refund_events` records Stripe refund webhooks and credit reversals idempotently.
 - `public.apply_credit_change(...)` is the atomic database helper the gateway uses for grants and consumes.
 - `public.record_payment_event(...)` is the Stripe-ready entry point for a future verified webhook.
 
@@ -112,6 +115,8 @@ With `CREDIT_GATEWAY_URL` set, the CLI will automatically use the gateway for ba
 caesim login --email test@example.com --otp
 caesim credits balance
 caesim credits buy --credits 1000
+caesim credits purchases
+caesim credits refund-request <purchase-id>
 caesim cut <path> --rule duplicates --find cars
 ```
 

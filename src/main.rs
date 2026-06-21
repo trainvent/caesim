@@ -163,10 +163,24 @@ enum CreditsCommand {
     /// Show current credit balance
     Balance,
     /// Buy prepaid credits with Stripe Checkout
+    #[command(
+        after_help = "Price:\n  1,000 credits = $1.69 USD\n\nExamples:\n  caesim credits buy\n  caesim credits buy 3000\n  caesim credits buy --credits 3000"
+    )]
     Buy {
         /// Amount of credits to buy (must be a multiple of 1000)
-        #[arg(long, default_value_t = 1000)]
-        credits: i64,
+        amount: Option<i64>,
+
+        /// Amount of credits to buy (must be a multiple of 1000)
+        #[arg(long)]
+        credits: Option<i64>,
+    },
+    /// Show completed credit purchases
+    Purchases,
+    /// Request a refund for a purchase id from `credits purchases`
+    #[command(name = "refund-request")]
+    RefundRequest {
+        /// Purchase id from `caesim credits purchases`
+        payment_event_id: i64,
     },
     /// Add toy credits to account
     Add {
@@ -612,7 +626,9 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
                 eprintln!("Credit balance: {} credits", me.credit_balance);
                 Ok(())
             }
-            Some(CreditsCommand::Buy { credits }) => {
+            Some(CreditsCommand::Buy { amount, credits }) => {
+                let credits = choose_credit_purchase_amount(amount, credits)?;
+                confirm_credit_purchase(credits)?;
                 let checkout = auth::create_credit_checkout(&session.session_token, credits).await?;
                 eprintln!(
                     "Stripe Checkout: {} credits for {}.",
@@ -622,6 +638,23 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
                 eprintln!("Session: {}", checkout.checkout_session_id);
                 eprintln!("Open this URL to pay:");
                 eprintln!("{}", checkout.checkout_url);
+                Ok(())
+            }
+            Some(CreditsCommand::Purchases) => {
+                let purchases = auth::list_credit_purchases(&session.session_token).await?;
+                print_credit_purchases(&purchases);
+                Ok(())
+            }
+            Some(CreditsCommand::RefundRequest { payment_event_id }) => {
+                let request = auth::request_credit_refund(&session.session_token, payment_event_id).await?;
+                eprintln!(
+                    "Refund request #{} created for purchase #{} ({}, created {}).",
+                    request.refund_request_id,
+                    request.payment_event_id,
+                    request.status,
+                    format_unix_date(request.created_at)
+                );
+                eprintln!("An admin will review it and issue the Stripe refund if approved.");
                 Ok(())
             }
             Some(CreditsCommand::Add { amount }) => {
@@ -682,6 +715,106 @@ fn format_money(amount_cents: i64, currency: &str) -> String {
     let major = amount_cents / 100;
     let minor = amount_cents.abs() % 100;
     format!("{}.{:02} {}", major, minor, currency.to_ascii_uppercase())
+}
+
+fn choose_credit_purchase_amount(amount: Option<i64>, credits_flag: Option<i64>) -> Result<i64> {
+    match (amount, credits_flag) {
+        (Some(_), Some(_)) => Err(anyhow!("pass either AMOUNT or --credits, not both")),
+        (Some(credits), None) | (None, Some(credits)) => validate_credit_purchase_amount(credits),
+        (None, None) => prompt_credit_purchase_amount(),
+    }
+}
+
+fn prompt_credit_purchase_amount() -> Result<i64> {
+    eprintln!(
+        "Credits cost {} per 1,000 credits.",
+        format_money(credit_pack_price_cents(), "usd")
+    );
+
+    loop {
+        let answer = prompt_line("How many 1,000-credit packs would you like to buy? ")?;
+        let packs = answer
+            .parse::<i64>()
+            .with_context(|| format!("invalid number of credit packs: {}", answer))?;
+        if packs <= 0 {
+            eprintln!("Please enter a positive number.");
+            continue;
+        }
+
+        return Ok(packs.saturating_mul(credit_pack_size()));
+    }
+}
+
+fn validate_credit_purchase_amount(credits: i64) -> Result<i64> {
+    if credits <= 0 {
+        return Err(anyhow!("credits must be greater than 0"));
+    }
+    if credits % credit_pack_size() != 0 {
+        return Err(anyhow!(
+            "credits must be bought in {}-credit packs",
+            credit_pack_size()
+        ));
+    }
+    Ok(credits)
+}
+
+fn confirm_credit_purchase(credits: i64) -> Result<()> {
+    let packs = credits / credit_pack_size();
+    let total_cents = packs.saturating_mul(credit_pack_price_cents());
+    eprintln!(
+        "Purchase summary: {} credits for {}.",
+        credits,
+        format_money(total_cents, "usd")
+    );
+    let answer = prompt_line_allow_empty("Create Stripe Checkout? [y/N]: ")?;
+    if !is_yes_answer(&answer) {
+        return Err(anyhow!("credit purchase cancelled"));
+    }
+    Ok(())
+}
+
+fn print_credit_purchases(purchases: &[auth::PurchaseRow]) {
+    if purchases.is_empty() {
+        eprintln!("No completed credit purchases found.");
+        return;
+    }
+
+    eprintln!(
+        "{:<6} {:<12} {:>8} {:>12} {:<12} {:<16}",
+        "ID", "Created", "Credits", "Amount", "Status", "Refund"
+    );
+    for purchase in purchases {
+        let refund = purchase
+            .refund_status
+            .as_deref()
+            .or_else(|| purchase.refund_request_id.map(|_| "pending"))
+            .unwrap_or("-");
+        eprintln!(
+            "{:<6} {:<12} {:>8} {:>12} {:<12} {:<16}",
+            purchase.id,
+            format_unix_date(purchase.processed_at.unwrap_or(purchase.created_at)),
+            purchase.credits_granted,
+            format_money(purchase.amount_cents, &purchase.currency),
+            purchase.status,
+            refund
+        );
+    }
+}
+
+fn format_unix_date(timestamp: i64) -> String {
+    timestamp.to_string()
+}
+
+fn credit_pack_size() -> i64 {
+    1000
+}
+
+fn credit_pack_price_cents() -> i64 {
+    std::env::var("CREDIT_PACK_PRICE_CENTS")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(169)
 }
 
 fn current_unix_ts() -> i64 {

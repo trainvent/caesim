@@ -66,6 +66,34 @@ pub struct CheckoutResponse {
     pub currency: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PurchaseRow {
+    pub id: i64,
+    pub amount_cents: i64,
+    pub currency: String,
+    pub credits_granted: i64,
+    pub status: String,
+    pub created_at: i64,
+    pub processed_at: Option<i64>,
+    #[serde(default)]
+    pub refund_status: Option<String>,
+    #[serde(default)]
+    pub refund_request_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PurchasesResponse {
+    pub purchases: Vec<PurchaseRow>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RefundRequestResponse {
+    pub refund_request_id: i64,
+    pub payment_event_id: i64,
+    pub status: String,
+    pub created_at: i64,
+}
+
 pub fn default_supabase_url() -> Result<String> {
     env::var("PROJECT_URL").context("PROJECT_URL environment variable not set")
 }
@@ -534,6 +562,52 @@ async fn gateway_checkout(gateway_url: &str, session_token: &str, credits: i64) 
     Ok(checkout)
 }
 
+async fn gateway_purchases(gateway_url: &str, session_token: &str) -> Result<PurchasesResponse> {
+    let client = Client::new();
+    let resp = client
+        .post(gateway_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", session_token))
+        .json(&serde_json::json!({"action": "purchases"}))
+        .send()
+        .await
+        .with_context(|| format!("failed to contact credit gateway at {}", gateway_url))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(anyhow!("credit gateway returned {}: {}", status, body));
+    }
+
+    let purchases: PurchasesResponse = serde_json::from_str(&body)
+        .context("failed to parse credit gateway response")?;
+    Ok(purchases)
+}
+
+async fn gateway_refund_request(gateway_url: &str, session_token: &str, payment_event_id: i64) -> Result<RefundRequestResponse> {
+    let client = Client::new();
+    let resp = client
+        .post(gateway_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", session_token))
+        .json(&serde_json::json!({"action": "refund_request", "payment_event_id": payment_event_id}))
+        .send()
+        .await
+        .with_context(|| format!("failed to contact credit gateway at {}", gateway_url))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(anyhow!("credit gateway returned {}: {}", status, body));
+    }
+
+    let refund_request: RefundRequestResponse = serde_json::from_str(&body)
+        .context("failed to parse credit gateway response")?;
+    Ok(refund_request)
+}
+
 async fn gateway_grant(gateway_url: &str, admin_token: &str, user_id: &str, email: &str, amount: i64) -> Result<i64> {
     let client = Client::new();
     let resp = client
@@ -635,6 +709,22 @@ pub async fn create_credit_checkout(session_token: &str, amount_credits: i64) ->
     let gw = std::env::var("CREDIT_GATEWAY_URL")
         .context("CREDIT_GATEWAY_URL must be set to buy credits")?;
     gateway_checkout(&gw, session_token, amount_credits).await
+}
+
+pub async fn list_credit_purchases(session_token: &str) -> Result<Vec<PurchaseRow>> {
+    let gw = std::env::var("CREDIT_GATEWAY_URL")
+        .context("CREDIT_GATEWAY_URL must be set to list purchases")?;
+    Ok(gateway_purchases(&gw, session_token).await?.purchases)
+}
+
+pub async fn request_credit_refund(session_token: &str, payment_event_id: i64) -> Result<RefundRequestResponse> {
+    if payment_event_id <= 0 {
+        return Err(anyhow!("payment event id must be greater than 0"));
+    }
+
+    let gw = std::env::var("CREDIT_GATEWAY_URL")
+        .context("CREDIT_GATEWAY_URL must be set to request refunds")?;
+    gateway_refund_request(&gw, session_token, payment_event_id).await
 }
 
 pub async fn consume_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {

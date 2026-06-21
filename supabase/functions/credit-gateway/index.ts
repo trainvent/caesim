@@ -11,7 +11,7 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-type Action = "balance" | "consume" | "grant" | "payment" | "checkout";
+type Action = "balance" | "consume" | "grant" | "payment" | "checkout" | "purchases" | "refund_request";
 
 type BalanceRequest = {
   action?: Action;
@@ -30,6 +30,7 @@ type BalanceRequest = {
   stripe_payment_intent_id?: string;
   success_url?: string;
   cancel_url?: string;
+  payment_event_id?: number;
 };
 
 type SupabaseUser = {
@@ -70,6 +71,41 @@ type RpcPaymentEventRow = {
   ledger_id?: number | null;
 };
 
+type RpcRefundEventRow = {
+  refund_event_id?: number;
+  payment_event_id?: number | null;
+  user_id?: string;
+  credit_balance?: number | null;
+  balance_before?: number | null;
+  balance_after?: number | null;
+  ledger_id?: number | null;
+  credits_reversed?: number;
+  refund_delta_cents?: number;
+  status?: string;
+};
+
+type RpcRefundRequestRow = {
+  refund_request_id?: number;
+  payment_event_id?: number;
+  status?: string;
+  created_at?: number;
+};
+
+type PurchaseRow = {
+  id: number;
+  provider_event_id?: string;
+  stripe_checkout_session_id?: string;
+  stripe_payment_intent_id?: string;
+  amount_cents: number;
+  currency: string;
+  credits_granted: number;
+  status: string;
+  created_at: number;
+  processed_at?: number | null;
+  refund_status?: string | null;
+  refund_request_id?: number | null;
+};
+
 type StripeCheckoutSession = {
   id?: string;
   url?: string;
@@ -86,11 +122,19 @@ type StripeCheckoutSession = {
   metadata?: Record<string, string>;
 };
 
+type StripeCharge = {
+  id?: string;
+  payment_intent?: string;
+  amount_refunded?: number;
+  currency?: string;
+  metadata?: Record<string, string>;
+};
+
 type StripeEvent = {
   id?: string;
   type?: string;
   data?: {
-    object?: StripeCheckoutSession;
+    object?: StripeCheckoutSession | StripeCharge;
   };
 };
 
@@ -227,6 +271,46 @@ async function fetchUserRow(projectUrl: string, serviceKey: string, userId: stri
 
   const rows = await response.json() as UserRow[];
   return rows[0] ?? null;
+}
+
+async function fetchPurchaseRows(projectUrl: string, serviceKey: string, userId: string): Promise<PurchaseRow[]> {
+  const select = [
+    "id",
+    "provider_event_id",
+    "stripe_checkout_session_id",
+    "stripe_payment_intent_id",
+    "amount_cents",
+    "currency",
+    "credits_granted",
+    "status",
+    "created_at",
+    "processed_at",
+    "refund_requests(id,status)",
+  ].join(",");
+  const response = await fetch(
+    `${projectUrl}/rest/v1/payment_events?select=${encodeURIComponent(select)}&user_id=eq.${encodeURIComponent(userId)}&processed_at=not.is.null&credits_granted=gt.0&order=created_at.desc&refund_requests.order=created_at.desc&limit=20`,
+    {
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+      },
+    },
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`purchase lookup failed: ${response.status} ${errorText}`);
+  }
+
+  const rows = await response.json() as Array<PurchaseRow & { refund_requests?: Array<{ id: number; status: string }> }>;
+  return rows.map((row) => {
+    const refundRequest = row.refund_requests?.[0];
+    return {
+      ...row,
+      refund_request_id: refundRequest?.id ?? null,
+      refund_status: refundRequest?.status ?? null,
+    };
+  });
 }
 
 function requireAmount(value: unknown): number {
@@ -384,6 +468,16 @@ async function recordPaymentEvent(projectUrl: string, serviceKey: string, body: 
   return rows[0] ?? {};
 }
 
+async function recordRefundEvent(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcRefundEventRow> {
+  const rows = await callRpc<RpcRefundEventRow>(projectUrl, serviceKey, "record_refund_event", body);
+  return rows[0] ?? {};
+}
+
+async function requestRefund(projectUrl: string, serviceKey: string, body: Record<string, unknown>): Promise<RpcRefundRequestRow> {
+  const rows = await callRpc<RpcRefundRequestRow>(projectUrl, serviceKey, "request_refund", body);
+  return rows[0] ?? {};
+}
+
 Deno.serve(async (request: Request) => {
   if (request.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
@@ -401,11 +495,52 @@ Deno.serve(async (request: Request) => {
       const rawBody = await request.text();
       const event = await verifyStripeWebhookPayload(rawBody, stripeSignature, getStripeWebhookSecret());
 
+      if (event.type === "charge.refunded") {
+        const charge = event.data?.object as StripeCharge | undefined;
+        if (!charge) {
+          return jsonResponse(400, { error: "Stripe event did not include a charge" });
+        }
+
+        const providerEventId = event.id;
+        if (!providerEventId) {
+          return jsonResponse(400, { error: "Stripe event did not include an id" });
+        }
+
+        const amountRefunded = requireAmount(charge.amount_refunded);
+        const saved = await recordRefundEvent(projectUrl, serviceKey, {
+          p_provider: "stripe",
+          p_provider_event_id: providerEventId,
+          p_stripe_charge_id: charge.id ?? null,
+          p_stripe_payment_intent_id: charge.payment_intent ?? null,
+          p_amount_refunded_cents: amountRefunded,
+          p_currency: (charge.currency ?? "usd").toLowerCase(),
+          p_status: "succeeded",
+          p_metadata: {
+            stripe_event_type: event.type,
+            stripe_charge_id: charge.id,
+            stripe_payment_intent_id: charge.payment_intent,
+          },
+        });
+
+        return jsonResponse(200, {
+          ok: true,
+          received: true,
+          action: "refund",
+          refund_event_id: saved.refund_event_id,
+          payment_event_id: saved.payment_event_id,
+          user_id: saved.user_id,
+          status: saved.status,
+          refund_delta_cents: saved.refund_delta_cents,
+          credits_reversed: saved.credits_reversed,
+          credit_balance: saved.credit_balance,
+        });
+      }
+
       if (event.type !== "checkout.session.completed") {
         return jsonResponse(200, { ok: true, received: true, ignored: event.type ?? "unknown" });
       }
 
-      const session = event.data?.object;
+      const session = event.data?.object as StripeCheckoutSession | undefined;
       if (!session) {
         return jsonResponse(400, { error: "Stripe event did not include a checkout session" });
       }
@@ -509,6 +644,36 @@ Deno.serve(async (request: Request) => {
         credits,
         amount_cents: centsForCredits(credits),
         currency: "usd",
+      });
+    }
+
+    if (action === "purchases") {
+      const user = await getAuthenticatedUser(request);
+      const purchases = await fetchPurchaseRows(projectUrl, serviceKey, user.id);
+      return jsonResponse(200, {
+        ok: true,
+        action,
+        purchases,
+      });
+    }
+
+    if (action === "refund_request") {
+      const user = await getAuthenticatedUser(request);
+      const paymentEventId = requireAmount(payload.payment_event_id);
+      const saved = await requestRefund(projectUrl, serviceKey, {
+        p_user_id: user.id,
+        p_payment_event_id: paymentEventId,
+        p_reason: payload.reason ?? null,
+        p_metadata: payload.metadata ?? {},
+      });
+
+      return jsonResponse(200, {
+        ok: true,
+        action,
+        refund_request_id: saved.refund_request_id,
+        payment_event_id: saved.payment_event_id,
+        status: saved.status,
+        created_at: saved.created_at,
       });
     }
 

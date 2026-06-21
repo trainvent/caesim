@@ -118,12 +118,15 @@ The Supabase schema now includes a Stripe-ready payment foundation:
 - `public.users` carries billing metadata such as `stripe_customer_id`.
 - `public.credit_ledger` records every credit delta with source metadata.
 - `public.payment_events` stores idempotent payment events for later webhook replay.
-- The credit gateway creates Stripe Checkout Sessions and verifies `checkout.session.completed` webhooks.
+- `public.refund_events` records refund webhooks and credit reversals.
+- The credit gateway creates Stripe Checkout Sessions and verifies `checkout.session.completed` and `charge.refunded` webhooks.
 
 Credits are sold in 1000-credit packs. The default pack price is `$1.69`, configured with `CREDIT_PACK_PRICE_CENTS=169`.
 
 ```bash
 caesim credits buy --credits 1000
+caesim credits purchases
+caesim credits refund-request <purchase-id>
 ```
 
 See [supabase/README.md](supabase/README.md) and [supabase/functions/credit-gateway/README.md](supabase/functions/credit-gateway/README.md) for the request shape.

@@ -113,6 +113,7 @@ Notes
 
 - The function expects the Supabase service-role key to call transactional RPCs and auth lookups in production. Never embed this key in the client.
 - The CLI delegates balance and consume operations to this gateway when `CREDIT_GATEWAY_URL` is set.
-- Register a Stripe webhook endpoint for `checkout.session.completed` pointing at the deployed credit gateway URL. The function is deployed with JWT verification disabled so Stripe can call it; Stripe webhook requests are verified with `STRIPE_WEBHOOK_SECRET`.
+- Register a Stripe webhook endpoint for `checkout.session.completed` and `charge.refunded` pointing at the deployed credit gateway URL. The function is deployed with JWT verification disabled so Stripe can call it; Stripe webhook requests are verified with `STRIPE_WEBHOOK_SECRET`.
+- Refund webhooks reverse credits proportionally through `public.refund_events`. If the user has already spent the credits, the refund event is marked `requires_manual_review`.
 - The default price is 169 cents per 1000 credits.
 - Deploy and secrets management should be done using Supabase's dashboard or the CLI secrets management.
