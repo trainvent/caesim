@@ -19,6 +19,9 @@ psql "$(supabase db connection-string)" -f supabase/migrations/003_auth_user_row
 See `supabase/functions/credit-gateway/README.md` for deployment and local testing instructions. Make sure to set the following cloud config in your project:
 
 - `SERVICE_ROLE_KEY` (service role) — used by the gateway to mutate rows and validate user sessions in production
+- `STRIPE_SECRET_KEY` — used by the gateway to create Stripe Checkout Sessions
+- `STRIPE_WEBHOOK_SECRET` — used by the gateway to verify Stripe webhooks
+- `CREDIT_PACK_PRICE_CENTS=169` — charges $1.69 per 1000-credit pack
 
 `SUPABASE_URL` is optional for local testing only; the deployed function derives the project URL from the Supabase function host.
 
@@ -108,6 +111,7 @@ With `CREDIT_GATEWAY_URL` set, the CLI will automatically use the gateway for ba
 ```bash
 caesim login --email test@example.com --otp
 caesim credits balance
+caesim credits buy --credits 1000
 caesim cut <path> --rule duplicates --find cars
 ```
 

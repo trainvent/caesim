@@ -7,11 +7,11 @@ declare const Deno: {
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-caesim-admin-token",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type, x-caesim-admin-token, stripe-signature",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-type Action = "balance" | "consume" | "grant" | "payment";
+type Action = "balance" | "consume" | "grant" | "payment" | "checkout";
 
 type BalanceRequest = {
   action?: Action;
@@ -28,6 +28,8 @@ type BalanceRequest = {
   stripe_customer_id?: string;
   stripe_checkout_session_id?: string;
   stripe_payment_intent_id?: string;
+  success_url?: string;
+  cancel_url?: string;
 };
 
 type SupabaseUser = {
@@ -68,6 +70,33 @@ type RpcPaymentEventRow = {
   ledger_id?: number | null;
 };
 
+type StripeCheckoutSession = {
+  id?: string;
+  url?: string;
+  customer?: string;
+  customer_email?: string;
+  customer_details?: {
+    email?: string;
+  };
+  client_reference_id?: string;
+  payment_intent?: string;
+  payment_status?: string;
+  amount_total?: number;
+  currency?: string;
+  metadata?: Record<string, string>;
+};
+
+type StripeEvent = {
+  id?: string;
+  type?: string;
+  data?: {
+    object?: StripeCheckoutSession;
+  };
+};
+
+const CREDITS_PER_PACK = 1000;
+const DEFAULT_CREDIT_PACK_PRICE_CENTS = 169;
+
 function jsonResponse(status: number, body: Record<string, unknown>) {
   return new Response(JSON.stringify(body), {
     status,
@@ -82,6 +111,36 @@ function getServiceRoleKey(): string {
   const direct = Deno.env.get("SERVICE_ROLE_KEY");
   if (direct) return direct;
   throw new Error("missing Supabase service key: set SERVICE_ROLE_KEY");
+}
+
+function getStripeSecretKey(): string {
+  const direct = Deno.env.get("STRIPE_SECRET_KEY");
+  if (direct) return direct;
+  throw new Error("missing Stripe secret key: set STRIPE_SECRET_KEY");
+}
+
+function getStripeWebhookSecret(): string {
+  const direct = Deno.env.get("STRIPE_WEBHOOK_SECRET");
+  if (direct) return direct;
+  throw new Error("missing Stripe webhook secret: set STRIPE_WEBHOOK_SECRET");
+}
+
+function getCreditPackPriceCents(): number {
+  const raw = Deno.env.get("CREDIT_PACK_PRICE_CENTS");
+  if (!raw) return DEFAULT_CREDIT_PACK_PRICE_CENTS;
+
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error("CREDIT_PACK_PRICE_CENTS must be a positive integer");
+  }
+  return parsed;
+}
+
+function getDefaultUrl(name: string, fallbackPath: string): string {
+  const direct = Deno.env.get(name);
+  if (direct) return direct;
+  const siteUrl = Deno.env.get("SITE_URL")?.replace(/\/$/, "") || "https://caesim.app";
+  return `${siteUrl}${fallbackPath}`;
 }
 
 function deriveProjectUrlFromRequest(request: Request): string | null {
@@ -177,6 +236,124 @@ function requireAmount(value: unknown): number {
   return value;
 }
 
+function requireCreditPackAmount(value: unknown): number {
+  const credits = requireAmount(value);
+  if (credits % CREDITS_PER_PACK !== 0) {
+    throw new Error(`credits must be bought in ${CREDITS_PER_PACK}-credit packs`);
+  }
+  return credits;
+}
+
+function centsForCredits(credits: number): number {
+  return (credits / CREDITS_PER_PACK) * getCreditPackPriceCents();
+}
+
+function parseStripeSignature(header: string): { timestamp: string; signatures: string[] } {
+  let timestamp = "";
+  const signatures: string[] = [];
+
+  for (const part of header.split(",")) {
+    const [key, value] = part.split("=", 2);
+    if (key === "t" && value) timestamp = value;
+    if (key === "v1" && value) signatures.push(value);
+  }
+
+  if (!timestamp || signatures.length === 0) {
+    throw new Error("invalid Stripe signature header");
+  }
+
+  return { timestamp, signatures };
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+async function verifyStripeWebhookPayload(rawBody: string, signatureHeader: string, secret: string): Promise<StripeEvent> {
+  const { timestamp, signatures } = parseStripeSignature(signatureHeader);
+  const timestampNumber = Number.parseInt(timestamp, 10);
+  if (!Number.isInteger(timestampNumber) || Math.abs(Date.now() / 1000 - timestampNumber) > 300) {
+    throw new Error("Stripe webhook timestamp is outside tolerance");
+  }
+
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signedPayload = `${timestamp}.${rawBody}`;
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(signedPayload));
+  const expected = bytesToHex(new Uint8Array(digest));
+
+  if (!signatures.some((signature) => timingSafeEqual(signature, expected))) {
+    throw new Error("Stripe webhook signature verification failed");
+  }
+
+  return JSON.parse(rawBody) as StripeEvent;
+}
+
+async function createStripeCheckoutSession(params: {
+  userId: string;
+  email: string;
+  credits: number;
+  successUrl: string;
+  cancelUrl: string;
+  stripeCustomerId?: string | null;
+}): Promise<StripeCheckoutSession> {
+  const packCount = params.credits / CREDITS_PER_PACK;
+  const body = new URLSearchParams();
+  body.set("mode", "payment");
+  body.set("success_url", params.successUrl);
+  body.set("cancel_url", params.cancelUrl);
+  body.set("client_reference_id", params.userId);
+  body.set("line_items[0][quantity]", String(packCount));
+  body.set("line_items[0][price_data][currency]", "usd");
+  body.set("line_items[0][price_data][unit_amount]", String(getCreditPackPriceCents()));
+  body.set("line_items[0][price_data][product_data][name]", `${CREDITS_PER_PACK} Caesim credits`);
+  body.set("metadata[user_id]", params.userId);
+  body.set("metadata[credits_granted]", String(params.credits));
+  body.set("metadata[credit_pack_size]", String(CREDITS_PER_PACK));
+  body.set("metadata[credit_pack_price_cents]", String(getCreditPackPriceCents()));
+  body.set("payment_intent_data[metadata][user_id]", params.userId);
+  body.set("payment_intent_data[metadata][credits_granted]", String(params.credits));
+
+  if (params.stripeCustomerId) {
+    body.set("customer", params.stripeCustomerId);
+  } else {
+    body.set("customer_creation", "always");
+    if (params.email) {
+      body.set("customer_email", params.email);
+    }
+  }
+
+  const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${getStripeSecretKey()}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+
+  const responseText = await response.text();
+  if (!response.ok) {
+    throw new Error(`Stripe checkout session failed: ${response.status} ${responseText}`);
+  }
+
+  return JSON.parse(responseText) as StripeCheckoutSession;
+}
+
 async function callRpc<T>(projectUrl: string, serviceKey: string, functionName: string, body: Record<string, unknown>): Promise<T[]> {
   const response = await fetch(`${projectUrl}/rest/v1/rpc/${functionName}`, {
     method: "POST",
@@ -216,6 +393,85 @@ Deno.serve(async (request: Request) => {
     return jsonResponse(405, { error: "method not allowed" });
   }
 
+  const stripeSignature = request.headers.get("stripe-signature");
+  if (stripeSignature) {
+    try {
+      const serviceKey = getServiceRoleKey();
+      const projectUrl = getProjectUrl(request);
+      const rawBody = await request.text();
+      const event = await verifyStripeWebhookPayload(rawBody, stripeSignature, getStripeWebhookSecret());
+
+      if (event.type !== "checkout.session.completed") {
+        return jsonResponse(200, { ok: true, received: true, ignored: event.type ?? "unknown" });
+      }
+
+      const session = event.data?.object;
+      if (!session) {
+        return jsonResponse(400, { error: "Stripe event did not include a checkout session" });
+      }
+
+      if (session.payment_status !== "paid") {
+        return jsonResponse(200, { ok: true, received: true, ignored: session.payment_status ?? "unpaid" });
+      }
+
+      const userId = session.metadata?.user_id ?? session.client_reference_id;
+      if (!userId) {
+        return jsonResponse(400, { error: "Stripe session did not include user_id metadata" });
+      }
+
+      const creditsGranted = requireAmount(Number.parseInt(session.metadata?.credits_granted ?? "", 10));
+      const amountCents = requireAmount(session.amount_total);
+      const expectedCents = centsForCredits(creditsGranted);
+      if (amountCents !== expectedCents) {
+        return jsonResponse(400, {
+          error: "Stripe session amount did not match credit price",
+          amount_cents: amountCents,
+          expected_cents: expectedCents,
+        });
+      }
+
+      const providerEventId = event.id ?? session.id;
+      if (!providerEventId) {
+        return jsonResponse(400, { error: "Stripe event did not include an id" });
+      }
+
+      const row = await fetchUserRow(projectUrl, serviceKey, userId).catch(() => null);
+      const saved = await recordPaymentEvent(projectUrl, serviceKey, {
+        p_provider: "stripe",
+        p_provider_event_id: providerEventId,
+        p_user_id: userId,
+        p_amount_cents: amountCents,
+        p_currency: (session.currency ?? "usd").toLowerCase(),
+        p_credits_granted: creditsGranted,
+        p_status: "succeeded",
+        p_metadata: {
+          stripe_event_type: event.type,
+          stripe_session_id: session.id,
+          credit_pack_size: CREDITS_PER_PACK,
+          credit_pack_price_cents: getCreditPackPriceCents(),
+        },
+        p_email: session.customer_details?.email ?? session.customer_email ?? row?.billing_email ?? row?.email ?? null,
+        p_stripe_customer_id: session.customer ?? row?.stripe_customer_id ?? null,
+        p_stripe_checkout_session_id: session.id ?? null,
+        p_stripe_payment_intent_id: session.payment_intent ?? null,
+      });
+
+      return jsonResponse(200, {
+        ok: true,
+        received: true,
+        action: "payment",
+        payment_event_id: saved.payment_event_id,
+        user_id: userId,
+        credits_granted: creditsGranted,
+        credit_balance: saved.credit_balance,
+      });
+    } catch (error) {
+      return jsonResponse(400, {
+        error: error instanceof Error ? error.message : "invalid Stripe webhook",
+      });
+    }
+  }
+
   let payload: BalanceRequest;
   try {
     payload = await request.json() as BalanceRequest;
@@ -228,6 +484,33 @@ Deno.serve(async (request: Request) => {
   try {
     const serviceKey = getServiceRoleKey();
     const projectUrl = getProjectUrl(request);
+
+    if (action === "checkout") {
+      const user = await getAuthenticatedUser(request);
+      const row = await fetchUserRow(projectUrl, serviceKey, user.id).catch(() => null);
+      const credits = requireCreditPackAmount(payload.credits_granted ?? payload.amount);
+      const email = pickUserEmail(row ?? undefined, user).trim();
+      const successUrl = payload.success_url?.trim() || getDefaultUrl("STRIPE_CHECKOUT_SUCCESS_URL", "/credits/success");
+      const cancelUrl = payload.cancel_url?.trim() || getDefaultUrl("STRIPE_CHECKOUT_CANCEL_URL", "/credits/cancel");
+      const session = await createStripeCheckoutSession({
+        userId: user.id,
+        email,
+        credits,
+        successUrl,
+        cancelUrl,
+        stripeCustomerId: row?.stripe_customer_id ?? null,
+      });
+
+      return jsonResponse(200, {
+        ok: true,
+        action,
+        checkout_session_id: session.id,
+        checkout_url: session.url,
+        credits,
+        amount_cents: centsForCredits(credits),
+        currency: "usd",
+      });
+    }
 
     if (action === "grant" || action === "payment") {
       const defaultAdminEmail = Deno.env.get("CREDIT_ADMIN_EMAIL") ?? "service@trainvent.com";

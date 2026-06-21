@@ -162,6 +162,12 @@ struct CreditsArgs {
 enum CreditsCommand {
     /// Show current credit balance
     Balance,
+    /// Buy prepaid credits with Stripe Checkout
+    Buy {
+        /// Amount of credits to buy (must be a multiple of 1000)
+        #[arg(long, default_value_t = 1000)]
+        credits: i64,
+    },
     /// Add toy credits to account
     Add {
         /// Amount in credits (e.g., 100)
@@ -596,9 +602,6 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
     let runtime = Runtime::new().context("failed to create async runtime")?;
     runtime.block_on(async move {
         let mut session = auth::load_session()?.ok_or_else(|| anyhow!("no local session found; run `caesim login` first"))?;
-        if !session.email.trim().eq_ignore_ascii_case("service@trainvent.com") {
-            return Err(anyhow!("payment processing is coming soon - contact support to get toy credits for testing"));
-        }
         let supabase_url = auth::default_supabase_url().unwrap_or_else(|_| session.supabase_url.clone());
         let supabase_key = auth::default_supabase_anon_key()?;
         auth::ensure_session_fresh(&supabase_url, &supabase_key, &mut session).await?;
@@ -609,7 +612,22 @@ fn run_credits(args: CreditsArgs) -> Result<()> {
                 eprintln!("Credit balance: {} credits", me.credit_balance);
                 Ok(())
             }
+            Some(CreditsCommand::Buy { credits }) => {
+                let checkout = auth::create_credit_checkout(&session.session_token, credits).await?;
+                eprintln!(
+                    "Stripe Checkout: {} credits for {}.",
+                    checkout.credits,
+                    format_money(checkout.amount_cents, &checkout.currency)
+                );
+                eprintln!("Session: {}", checkout.checkout_session_id);
+                eprintln!("Open this URL to pay:");
+                eprintln!("{}", checkout.checkout_url);
+                Ok(())
+            }
             Some(CreditsCommand::Add { amount }) => {
+                if !session.email.trim().eq_ignore_ascii_case("service@trainvent.com") {
+                    return Err(anyhow!("toy credit grants are only enabled for service@trainvent.com; use `caesim credits buy --credits 1000` to buy credits"));
+                }
                 auth::add_credits(&supabase_url, &supabase_key, &session.user_id, &session.session_token, amount).await?;
                 eprintln!("Added {} credits.", amount);
                 let me = auth::fetch_me(&supabase_url, &supabase_key, &session.user_id, &session.session_token).await?;
@@ -658,6 +676,12 @@ fn prompt_password(prompt: &str) -> Result<String> {
         }
         eprintln!("Password cannot be empty. Please try again.");
     }
+}
+
+fn format_money(amount_cents: i64, currency: &str) -> String {
+    let major = amount_cents / 100;
+    let minor = amount_cents.abs() % 100;
+    format!("{}.{:02} {}", major, minor, currency.to_ascii_uppercase())
 }
 
 fn current_unix_ts() -> i64 {
@@ -881,8 +905,7 @@ fn run_cut(args: CutArgs) -> Result<()> {
             &session.user_id,
             &session.session_token,
         ))?;
-        let credit_estimate =
-            estimate_vision_credit_cost(&images, vision_features.len(), cloud_vision_chunk_size())?;
+        let credit_estimate = estimate_vision_credit_cost(&images, vision_features.len())?;
         let cost = credit_estimate.credits;
 
         if me.credit_balance < cost {
@@ -1721,7 +1744,6 @@ impl VisionCreditEstimate {
 fn estimate_vision_credit_cost(
     images: &[PathBuf],
     feature_count: usize,
-    chunk_size: usize,
 ) -> Result<VisionCreditEstimate> {
     if images.is_empty() || feature_count == 0 {
         return Ok(VisionCreditEstimate {
@@ -1742,15 +1764,7 @@ fn estimate_vision_credit_cost(
     }
 
     let image_feature_ops = images.len() as u64 * feature_count as u64;
-    let request_count = images.len().div_ceil(chunk_size.max(1)) as u64;
-
-    let upload_credits = upload_bytes.div_ceil(1_048_576);
-    let operation_credits = image_feature_ops.div_ceil(25);
-    let request_credits = request_count.div_ceil(10);
-    let credits = upload_credits
-        .saturating_add(operation_credits)
-        .saturating_add(request_credits)
-        .max(1) as i64;
+    let credits = image_feature_ops.max(1) as i64;
 
     Ok(VisionCreditEstimate {
         credits,

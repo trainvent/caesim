@@ -57,6 +57,15 @@ pub struct MeResponse {
     pub expires_at: i64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CheckoutResponse {
+    pub checkout_url: String,
+    pub checkout_session_id: String,
+    pub credits: i64,
+    pub amount_cents: i64,
+    pub currency: String,
+}
+
 pub fn default_supabase_url() -> Result<String> {
     env::var("PROJECT_URL").context("PROJECT_URL environment variable not set")
 }
@@ -502,6 +511,29 @@ async fn gateway_consume(gateway_url: &str, session_token: &str, amount: i64) ->
     Ok(bal)
 }
 
+async fn gateway_checkout(gateway_url: &str, session_token: &str, credits: i64) -> Result<CheckoutResponse> {
+    let client = Client::new();
+    let resp = client
+        .post(gateway_url)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", session_token))
+        .json(&serde_json::json!({"action": "checkout", "credits_granted": credits}))
+        .send()
+        .await
+        .with_context(|| format!("failed to contact credit gateway at {}", gateway_url))?;
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    if !status.is_success() {
+        return Err(anyhow!("credit gateway returned {}: {}", status, body));
+    }
+
+    let checkout: CheckoutResponse = serde_json::from_str(&body)
+        .context("failed to parse credit gateway response")?;
+    Ok(checkout)
+}
+
 async fn gateway_grant(gateway_url: &str, admin_token: &str, user_id: &str, email: &str, amount: i64) -> Result<i64> {
     let client = Client::new();
     let resp = client
@@ -593,6 +625,16 @@ pub async fn add_credits(base_url: &str, anon_key: &str, user_id: &str, session_
     let new_balance = current.saturating_add(amount_credits);
     set_credit_balance(base_url, anon_key, user_id, session_token, new_balance).await?;
     Ok(new_balance)
+}
+
+pub async fn create_credit_checkout(session_token: &str, amount_credits: i64) -> Result<CheckoutResponse> {
+    if amount_credits <= 0 {
+        return Err(anyhow!("amount must be greater than 0"));
+    }
+
+    let gw = std::env::var("CREDIT_GATEWAY_URL")
+        .context("CREDIT_GATEWAY_URL must be set to buy credits")?;
+    gateway_checkout(&gw, session_token, amount_credits).await
 }
 
 pub async fn consume_credits(base_url: &str, anon_key: &str, user_id: &str, session_token: &str, amount_credits: i64) -> Result<i64> {
