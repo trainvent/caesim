@@ -131,6 +131,17 @@ caesim credits refund-request <purchase-id>
 
 See [supabase/README.md](supabase/README.md) and [supabase/functions/credit-gateway/README.md](supabase/functions/credit-gateway/README.md) for the request shape.
 
+## Legal Policies
+
+Policy drafts live in [legal](legal):
+
+- [Terms of Service](legal/terms-of-service.md)
+- [Privacy Policy](legal/privacy-policy.md)
+- [Refund Policy](legal/refund-policy.md)
+- [Credit Policy](legal/credit-policy.md)
+
+The CLI asks for Terms and Privacy acceptance during signup, and Refund and Credit Policy acceptance before creating Stripe Checkout.
+
 ## Version Bumps
 
 To bump the release version in one step, run:

@@ -14,6 +14,11 @@ use std::process::{Command, Stdio};
 use tokio::runtime::Runtime;
 use walkdir::WalkDir;
 
+const TERMS_PATH: &str = "legal/terms-of-service.md";
+const PRIVACY_PATH: &str = "legal/privacy-policy.md";
+const REFUND_POLICY_PATH: &str = "legal/refund-policy.md";
+const CREDIT_POLICY_PATH: &str = "legal/credit-policy.md";
+
 #[derive(Parser, Debug)]
 #[command(
     name = "caesim",
@@ -419,6 +424,8 @@ fn run_signup(args: SignupArgs) -> Result<()> {
             None => prompt_line("Email address: ")?,
         };
 
+        require_signup_legal_consent()?;
+
         eprintln!("Sending verification code to {}...", email);
         let login = auth::start_login(&supabase_url, &supabase_key, &email).await?;
         eprintln!("{}", login.message);
@@ -711,6 +718,49 @@ fn prompt_password(prompt: &str) -> Result<String> {
     }
 }
 
+fn require_signup_legal_consent() -> Result<()> {
+    require_policy_consent(
+        "Before creating an account, review and accept:",
+        &[
+            ("Terms of Service", TERMS_PATH),
+            ("Privacy Policy", PRIVACY_PATH),
+        ],
+        "Type yes to accept the Terms of Service and Privacy Policy: ",
+        "signup cancelled because legal consent was not accepted",
+    )
+}
+
+fn require_checkout_legal_consent() -> Result<()> {
+    require_policy_consent(
+        "Before checkout, review and accept:",
+        &[
+            ("Refund Policy", REFUND_POLICY_PATH),
+            ("Credit Policy", CREDIT_POLICY_PATH),
+        ],
+        "Type yes to accept the Refund Policy and Credit Policy: ",
+        "credit purchase cancelled because payment policies were not accepted",
+    )
+}
+
+fn require_policy_consent(
+    heading: &str,
+    policies: &[(&str, &str)],
+    prompt: &str,
+    cancellation_message: &str,
+) -> Result<()> {
+    eprintln!("{}", heading);
+    for (name, path) in policies {
+        eprintln!("  - {}: {}", name, path);
+    }
+    eprintln!();
+
+    let answer = prompt_line(prompt)?;
+    if !is_yes_answer(&answer) {
+        return Err(anyhow!("{}", cancellation_message));
+    }
+    Ok(())
+}
+
 fn format_money(amount_cents: i64, currency: &str) -> String {
     let major = amount_cents / 100;
     let minor = amount_cents.abs() % 100;
@@ -766,6 +816,7 @@ fn confirm_credit_purchase(credits: i64) -> Result<()> {
         credits,
         format_money(total_cents, "usd")
     );
+    require_checkout_legal_consent()?;
     let answer = prompt_line_allow_empty("Create Stripe Checkout? [y/N]: ")?;
     if !is_yes_answer(&answer) {
         return Err(anyhow!("credit purchase cancelled"));

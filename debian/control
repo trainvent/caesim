@@ -4,7 +4,7 @@ Priority: optional
 Maintainer: Trainvent <dev@trainvent.com>
 Rules-Requires-Root: no
 Build-Depends: debhelper-compat (= 13), cargo, rustc, libssl-dev, pkg-config
-Standards-Version: 0.1.9
+Standards-Version: 0.2.0
 
 Package: caesim
 Architecture: any
