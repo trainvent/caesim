@@ -208,8 +208,6 @@ struct ComplexityEstimate {
 struct VisionCreditEstimate {
     credits: i64,
     upload_bytes: u64,
-    image_feature_ops: u64,
-    request_count: u64,
 }
 
 // Backboard request/response types moved to `src/ai_assist` module.
@@ -808,6 +806,10 @@ fn is_no_answer(value: &str) -> bool {
     matches!(value.trim().to_ascii_lowercase().as_str(), "n" | "no")
 }
 
+fn is_yes_answer(value: &str) -> bool {
+    matches!(value.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
 fn run_cut(args: CutArgs) -> Result<()> {
     if !args.path.exists() {
         return Err(anyhow!("path does not exist: {}", args.path.display()));
@@ -892,13 +894,19 @@ fn run_cut(args: CutArgs) -> Result<()> {
         }
 
         eprintln!(
-            "Toy credits: vision run will cost {} credit(s) for {:.2} MiB upload, {} image-feature op(s), {} request(s); current balance is {}.",
+            "Toy credits: find will use {} credits to scan {} images ({:.2} MiB upload). Current balance: {}.",
             cost,
+            images.len(),
             credit_estimate.upload_mebibytes(),
-            credit_estimate.image_feature_ops,
-            credit_estimate.request_count,
             me.credit_balance
         );
+        let consent =
+            prompt_line_allow_empty(&format!("Use {} credits and run find now? [y/N]: ", cost))?;
+        if !is_yes_answer(&consent) {
+            eprintln!("Toy credits: charge skipped; find run cancelled.");
+            return Ok(());
+        }
+
         vision_credit_cost = Some(cost);
         credit_balance_before = Some(me.credit_balance);
         vision_credit_runtime = Some(runtime);
@@ -1127,12 +1135,12 @@ fn run_cut(args: CutArgs) -> Result<()> {
     write_report(&report_path, &report)?;
     if args.dry_run {
         eprintln!(
-            "Matched {} image(s); dry run, moved 0.",
+            "Matched {} images; dry run, moved 0.",
             report.matched_count
         );
     } else {
         eprintln!(
-            "Matched {} image(s); moved {} into {}.",
+            "Matched {} images; moved {} into {}.",
             report.matched_count,
             report.moved_count,
             cut_dir_path.display()
@@ -1719,8 +1727,6 @@ fn estimate_vision_credit_cost(
         return Ok(VisionCreditEstimate {
             credits: 0,
             upload_bytes: 0,
-            image_feature_ops: 0,
-            request_count: 0,
         });
     }
 
@@ -1749,8 +1755,6 @@ fn estimate_vision_credit_cost(
     Ok(VisionCreditEstimate {
         credits,
         upload_bytes,
-        image_feature_ops,
-        request_count,
     })
 }
 
@@ -1889,11 +1893,10 @@ fn call_cloud_vision(url: &str, req: &VisionRequest) -> Result<HashMap<String, V
         let start = chunk_index * chunk_size + 1;
         let end = start + paths.len() - 1;
         eprintln!(
-            "Cloud Vision uploading images {}-{}/{} ({} image(s))",
+            "Cloud Vision uploading images {}-{}/{}",
             start,
             end,
-            req.images.len(),
-            paths.len()
+            req.images.len()
         );
 
         let images = paths

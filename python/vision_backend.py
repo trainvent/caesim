@@ -65,7 +65,7 @@ def main() -> int:
 
     signal_count = sum(1 for result in out if has_any_signal(result))
     sys.stderr.write(
-        f"Google Vision returned analysis signals for {signal_count}/{len(out)} image(s)\n"
+        f"Google Vision returned analysis signals for {signal_count}/{len(out)} images\n"
     )
     error_samples = [
         error for result in out for error in result.get("errors", [])[:1]
